@@ -1,6 +1,11 @@
 /* Voice notes (js/audio.js). Uses theme variables from styles.css. */
 .audio-box { display: flex; flex-direction: column; gap: 10px; }
-.audio-rec-btn { width: 100%; min-height: 64px; font-size: 1.2rem; }
+.audio-rec-row { display: flex; gap: 8px; }
+.audio-rec-btn { flex: 2 1 0; width: 100%; min-height: 72px; font-size: 1.2rem; }
+.audio-pause-btn { flex: 1 1 0; min-height: 72px; font-size: 1.1rem; }
+.audio-pause-btn[hidden] { display: none; }
+.audio-pause-btn.paused { background: var(--primary); color: var(--primary-text); }
+.audio-timer.paused { color: var(--muted); }
 .audio-rec-btn.audio-recording { background: var(--danger); border-color: var(--danger); color: #fff; animation: audio-pulse 1.2s ease-in-out infinite; }
 .audio-timer { text-align: center; font-size: 1.8rem; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--danger); }
 .audio-timer[hidden], .audio-error[hidden] { display: none; }

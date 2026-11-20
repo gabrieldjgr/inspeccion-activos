@@ -5,11 +5,12 @@ import * as assetsUi from './assets.js';
 import { recoverOrphanAudio } from './audio.js';
 import * as projects from './projects.js';
 import { runMigrationGate } from './migrate.js';
+import { assignMissingDisplayIds } from './data.js';
 
 const $app = document.getElementById('app');
 const $banners = document.getElementById('banners');
 const $dlg = document.getElementById('dlg');
-const state = { deviceId: null, persisted: null, project: null };
+const state = { deviceId: null, persisted: null, project: null, lastSaved: null, highlight: null };
 
 // ---------- helpers ----------
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -111,6 +112,9 @@ function storageHtml(i) {
 // Re-read the active project (after creating, switching, editing or archiving) and repaint the header chip.
 async function refreshProject() {
   state.project = await projects.getActiveProject();
+  // Assets saved before the valuer code existed (or migrated from v0.2) get their B1-GA-A001 id now.
+  if (state.project?.valuer_code) { try { await assignMissingDisplayIds(state.project); } catch (e) { console.error(e); } }
+  if (state.lastSaved && state.lastSaved.project_id !== state.project?.id) state.lastSaved = null;
   paintProjectChip();
   return state.project;
 }
@@ -122,11 +126,13 @@ function paintProjectChip() {
   el.classList.toggle('none', !p);
 }
 
+function applyTheme(t) { if (t === 'sol') document.documentElement.dataset.theme = 'sol'; else delete document.documentElement.dataset.theme; }
+
 const h = { $app, $dlg, state, esc, ask, confirmDlg, showBanner, hideBanner, reportError, download, fmtBytes, storageInfo, storageHtml, navigate, refreshProject, requestPersistence };
 
 // ---------- views ----------
 async function viewSettings() {
-  const [inspector, quality, gps, info] = await Promise.all([db.getSetting('inspector', ''), db.getSetting('photo_quality', 'alta'), db.getSetting('gps_enabled', false), storageInfo()]);
+  const [inspector, quality, gps, info, cameraMode, theme] = await Promise.all([db.getSetting('inspector', ''), db.getSetting('photo_quality', 'alta'), db.getSetting('gps_enabled', false), storageInfo(), db.getSetting('camera_mode', 'sistema'), db.getSetting('theme', 'auto')]);
   $app.innerHTML = `
     <h1>Ajustes</h1>
     <div class="card">
@@ -135,8 +141,20 @@ async function viewSettings() {
       <p class="muted">Se agregará automáticamente a cada registro.</p>
       <label for="quality">Calidad de fotos</label>
       <select id="quality">
-        <option value="alta"${quality === 'alta' ? ' selected' : ''}>Alta (2560 px, JPEG 0,90) — recomendado</option>
-        <option value="original"${quality === 'original' ? ' selected' : ''}>Original (sin recomprimir)</option>
+        <option value="alta"${quality === 'alta' ? ' selected' : ''}>Alta (3072 px, JPEG 0,88) — recomendado</option>
+        <option value="original"${quality === 'original' ? ' selected' : ''}>Original (sin recomprimir; ocupa más)</option>
+      </select>
+      <p class="muted small">Las fotos tomadas con <strong>🔎 Placa</strong> siempre se guardan a resolución completa.</p>
+      <label for="cammode">Cámara</label>
+      <select id="cammode">
+        <option value="sistema"${cameraMode === 'sistema' ? ' selected' : ''}>Cámara del sistema (una foto por vez)</option>
+        <option value="rapida"${cameraMode === 'rapida' ? ' selected' : ''}>Cámara rápida en la app — beta (varias fotos seguidas)</option>
+      </select>
+      <p class="muted small">La cámara rápida no sale de la app entre fotos. En iPhone la calidad es menor que la del sistema: para placas usa la del sistema.</p>
+      <label for="theme">Pantalla</label>
+      <select id="theme">
+        <option value="auto"${theme === 'auto' ? ' selected' : ''}>Automática (claro / oscuro del teléfono)</option>
+        <option value="sol"${theme === 'sol' ? ' selected' : ''}>Modo sol: alto contraste para exteriores</option>
       </select>
       <label class="switch"><input id="gps" type="checkbox"${gps ? ' checked' : ''}> Guardar ubicación GPS en cada activo</label>
       <p id="saved" class="ok" role="status"></p>
@@ -159,6 +177,8 @@ async function viewSettings() {
   const $in = document.getElementById('inspector');
   $in.addEventListener('input', () => save('inspector', $in.value.trim()));
   document.getElementById('quality').addEventListener('change', (e) => save('photo_quality', e.target.value));
+  document.getElementById('cammode').addEventListener('change', (e) => save('camera_mode', e.target.value));
+  document.getElementById('theme').addEventListener('change', (e) => { applyTheme(e.target.value); save('theme', e.target.value); });
   document.getElementById('gps').addEventListener('change', (e) => save('gps_enabled', e.target.checked));
   document.getElementById('persist').addEventListener('click', async () => { await requestPersistence(); viewSettings(); });
   document.getElementById('check-update').addEventListener('click', async () => {
@@ -301,6 +321,7 @@ async function boot() {
   try {
     const migrated = await runMigrationGate(h); // v1 data: offers a backup, then upgrades the DB
     state.deviceId = await db.ensureDeviceId();
+    applyTheme(await db.getSetting('theme', 'auto'));
     await refreshProject();
     if (migrated) showBanner('migr', 'info', `Tus datos se movieron al proyecto “${esc(state.project?.name || 'Proyecto 1')}”. Cámbiale el nombre y define tu código de valuador.`, [{ label: 'Editar proyecto', onClick: () => { hideBanner('migr'); navigate('#/proyectos'); } }, { label: 'OK', onClick: () => hideBanner('migr') }]);
     state.persisted = await requestPersistence();
