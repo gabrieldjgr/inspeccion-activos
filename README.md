@@ -2,7 +2,7 @@
 
 App web instalable para registrar activos en campo, 100 % offline después de la primera carga. Sitio estático (HTML + CSS + JS, sin build) pensado para GitHub Pages. La especificación completa está en `BRIEF_App_Inspeccion_Activos.md`.
 
-**Estado: v0.3.5 — F0 (proyectos), F1 (captura rápida), F2 (edificios), F3 (plantilla e importación), F4 (exportación para IA) y F5 (reporte PDF) del plan v0.3.** Sobre la base v0.2 (registro, fotos, audio, exportación ZIP, respaldo) se agregan proyectos, código de valuador, paquete de proyecto y la migración segura de los datos existentes. Verificado en Chromium de escritorio con pruebas automatizadas (migración v1→v2 con datos reales de v0.2.2, fallo simulado a mitad de la migración, aislamiento entre proyectos, paquetes y restauración de respaldos v1/v2). **Sin probar aún en dispositivo real:** cámara, micrófono, compartir y modo avión (ver pruebas manuales abajo).
+**Estado: v0.3.6 — plan v0.3 completo: F0 (proyectos), F1 (captura rápida), F2 (edificios), F3 (plantilla e importación), F4 (exportación para IA), F5 (reporte PDF) y F6 (pulido, temas y proyecto de prueba).** Sobre la base v0.2 (registro, fotos, audio, exportación ZIP, respaldo) se agregan proyectos, código de valuador, paquete de proyecto y la migración segura de los datos existentes. Verificado en Chromium de escritorio con pruebas automatizadas (migración v1→v2 con datos reales de v0.2.2, fallo simulado a mitad de la migración, aislamiento entre proyectos, paquetes y restauración de respaldos v1/v2). **Sin probar aún en dispositivo real:** cámara, micrófono, compartir y modo avión (ver pruebas manuales abajo).
 
 ## Estructura
 
@@ -13,7 +13,7 @@ js/    app.js (rutas, ajustes, edificios) · assets.js (formulario, lista, depar
        buildings.js (lista con estados y formulario de edificio) · bldg-schema.js (columnas del Excel, listas, unidades)
        bldg-import.js (plantilla e importación de edificios) · xlsx.js (lector/escritor .xlsx mínimo sobre fflate)
        ai-export.js (ZIP para IA: estructura, índice, README_IA) · ziputil.js (ZIP, SHA-256) · export.js (pantalla Exportar, respaldo)
-       report.js (reporte de avance) · pdf.js (generador de PDF mínimo, Helvetica WinAnsi)
+       report.js (reporte de avance) · pdf.js (generador de PDF mínimo, Helvetica WinAnsi) · demo.js (Proyecto Test)
        photos.js · audio.js · export.js · db.js (IndexedDB) · csv.js · version.js
 css/   photos.css · audio.css · export.css      vendor/ fflate.esm.js (ZIP, vendorizado)
 icons/ iconos PNG (any, maskable, apple-touch)
@@ -77,6 +77,17 @@ Exportar → **📄 Compartir reporte** (o *Descargar PDF*), y en Edificios el b
 - Listas: activos sin foto, sin nota (ni texto ni voz), con fotos pero sin foto de placa, y edificios sin foto.
 
 Se comparte con la hoja de compartir del teléfono (WhatsApp, Teams, Outlook, Drive): a diferencia del ZIP, Android sí permite compartir PDF desde la app. Sin conexión funciona igual (el PDF se genera en el teléfono, sin librerías externas).
+
+## Pulido, temas y proyecto de prueba (v0.3 F6)
+
+- **Proyecto Test**: en la primera instalación (sin proyectos) se crea "Proyecto Test" (marcado DEMO) con 5 edificios (uno inspeccionado, uno en proceso), 6 departamentos, 10 activos (`B1-TS-A001`…) con fotos y placas legibles dibujadas por la app, una copia y avisos de ejemplo. Sirve para practicar todo antes de ir a campo. Proyectos → *Borrar proyecto de prueba* lo elimina con todos sus datos; *Cargar proyecto de prueba* lo vuelve a crear. Si la creación se interrumpe, se rehace al abrir la app. Los usuarios que ya tienen datos no lo reciben automáticamente.
+- **Temas**: Automático (como el teléfono), Claro, Oscuro y Modo sol (máximo contraste). Botón en la barra superior (cicla los cuatro) y en Ajustes. La barra de estado del teléfono sigue el color del tema.
+- **Diseño**: íconos SVG uniformes (barra inferior, tema, proyecto), logo propio, botones secundarios en tono suave para que destaque la acción principal, saludo con fecha en Inicio, cuatro indicadores (incluye edificios listos), botón flotante "+" que aparece al bajar en la lista, avisos debajo de la barra superior (no tapan el proyecto ni los botones).
+- **Respaldo por proyecto**: en Exportar (*Solo este proyecto* / *Todos*) y en cada tarjeta de Proyectos (*Respaldo*). Se guarda la fecha del último respaldo.
+- **Espacio**: cada proyecto muestra cuánto ocupan sus fotos y audios (Proyectos y Exportar).
+- **Recordatorio**: en Inicio, si hay ≥ 25 activos (o alguno de hace más de 48 h) sin respaldo ni exportación, aparece un aviso con acceso a Exportar (se puede posponer).
+- **Ayuda** reescrita como guía rápida de primeros pasos, captura, edificios, exportación y consejos de campo.
+- Corrige: en la primera visita con service worker la app se recargaba sola una vez (podía interrumpir el arranque); campos ocultos con `hidden` que seguían visibles (fechas en Exportar).
 
 ## Formato del CSV de edificios
 
@@ -237,3 +248,12 @@ La app solo graba los audios. Para transcribirlos en tu PC (Whisper local, espa�
 2. Revisar acentos y ñ (departamentos, nombres), tablas que pasan de página con encabezado repetido, número de página.
 3. Edificios → *📄 Reporte*: mismo PDF.
 4. En modo avión: el reporte se genera igual (se descarga o comparte cuando haya señal).
+
+## Pruebas manuales — v0.3 F6 (pulido, temas, proyecto de prueba)
+
+1. Instalar en un teléfono **sin la app**: al abrir aparece "Proyecto Test" (DEMO) con datos y fotos. Recorrer Inicio, un activo (ver la placa con zoom), Edificios, Exportar y el reporte PDF.
+2. Proyectos → *Borrar proyecto de prueba* → crear el proyecto real. *Cargar proyecto de prueba* lo vuelve a crear.
+3. Botón de tema (arriba a la derecha): Automático → Claro → Oscuro → Sol. Revisar legibilidad al sol y de noche.
+4. Proyectos → *Respaldo* de un proyecto → restaurarlo en otro teléfono.
+5. Registrar 25 activos sin exportar: debe aparecer el recordatorio en Inicio.
+6. Teléfono que ya tenía la app (v0.3.5): actualizar → no debe aparecer el proyecto de prueba automáticamente.

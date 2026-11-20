@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Inspección de Activos</title>
-  <meta name="theme-color" content="#1e3a5f">
+  <meta name="theme-color" content="#143d6b">
+  <meta name="color-scheme" content="light dark">
   <meta name="description" content="Registro de activos en campo, 100 % offline.">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" type="image/png" href="icons/icon-192.png">
@@ -18,17 +19,30 @@
   <link rel="stylesheet" href="css/export.css">
 </head>
 <body>
-  <div id="banners" aria-live="polite"></div>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/></symbol>
+    <symbol id="i-export" viewBox="0 0 24 24"><path d="M12 15V3"/><path d="M7 8l5-5 5 5"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></symbol>
+    <symbol id="i-building" viewBox="0 0 24 24"><path d="M4 21V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v16"/><path d="M16 9h2a2 2 0 0 1 2 2v10"/><path d="M2 21h20"/><path d="M8 7h4M8 11h4M8 15h4"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6V14"/><path d="M12 17.5h.01"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></symbol>
+    <symbol id="i-auto" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></symbol>
+    <symbol id="i-solmax" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5" fill="currentColor"/><path d="M12 1v3M12 20v3M3.5 3.5l2.1 2.1M18.4 18.4l2.1 2.1M1 12h3M20 12h3M3.5 20.5l2.1-2.1M18.4 5.6l2.1-2.1"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+  </svg>
   <header class="topbar">
-    <a class="brand" href="#/" aria-label="Inicio"></a>
-    <a class="proj-chip none" id="proj-chip" href="#/proyectos" aria-label="Proyecto activo (tocar para cambiar)"><small>Proyecto</small><strong>…</strong></a>
+    <a class="brand" href="#/" aria-label="Inicio"><svg viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="2" width="28" height="28" rx="8" fill="#f59e0b"/><path d="M10 9h12v15H10z" fill="none" stroke="#14213d" stroke-width="2.4" stroke-linejoin="round"/><path d="M13 16.5l2.5 2.5L20 13.5" fill="none" stroke="#14213d" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+    <a class="proj-chip none" id="proj-chip" href="#/proyectos" aria-label="Proyecto activo (tocar para cambiar)"><span class="pc-txt"><small>Proyecto</small><strong>…</strong></span></a>
+    <button type="button" class="theme-btn" id="theme-btn" aria-label="Cambiar tema"><svg class="ico"><use href="#i-auto"/></svg></button>
   </header>
+  <div id="banners" aria-live="polite"></div>
   <nav class="topnav" aria-label="Principal">
-    <a href="#/" data-route=""><i aria-hidden="true">🏠</i>Inicio</a>
-    <a href="#/exportar" data-route="exportar"><i aria-hidden="true">📤</i>Exportar</a>
-    <a href="#/edificios" data-route="edificios"><i aria-hidden="true">🏢</i>Edificios</a>
-    <a href="#/ajustes" data-route="ajustes"><i aria-hidden="true">⚙️</i>Ajustes</a>
-    <a href="#/ayuda" data-route="ayuda"><i aria-hidden="true">❓</i>Ayuda</a>
+    <a href="#/" data-route=""><svg class="ico" aria-hidden="true"><use href="#i-home"/></svg>Inicio</a>
+    <a href="#/edificios" data-route="edificios"><svg class="ico" aria-hidden="true"><use href="#i-building"/></svg>Edificios</a>
+    <a href="#/exportar" data-route="exportar"><svg class="ico" aria-hidden="true"><use href="#i-export"/></svg>Exportar</a>
+    <a href="#/ajustes" data-route="ajustes"><svg class="ico" aria-hidden="true"><use href="#i-settings"/></svg>Ajustes</a>
+    <a href="#/ayuda" data-route="ayuda"><svg class="ico" aria-hidden="true"><use href="#i-help"/></svg>Ayuda</a>
   </nav>
   <main id="app" tabindex="-1"><p class="muted pad">Cargando…</p></main>
   <dialog id="dlg"></dialog>

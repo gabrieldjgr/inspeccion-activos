@@ -126,11 +126,33 @@ function paintProjectChip() {
   const el = document.getElementById('proj-chip');
   if (!el) return;
   const p = state.project;
-  el.innerHTML = p ? `<small>Proyecto</small><strong>${esc(p.name)}</strong>` : '<small>Proyecto</small><strong>Elegir proyecto</strong>';
+  el.innerHTML = `<span class="pc-txt"><small>Proyecto</small><strong>${p ? esc(p.name) : 'Elegir proyecto'}</strong></span><svg class="ico" aria-hidden="true"><use href="#i-chev"/></svg>`;
   el.classList.toggle('none', !p);
+  el.classList.toggle('demo', !!p?.demo);
 }
 
-function applyTheme(t) { if (t === 'sol') document.documentElement.dataset.theme = 'sol'; else delete document.documentElement.dataset.theme; }
+// Themes: auto (follows the phone), light, dark, sol (max contrast). The top-bar button cycles them.
+const THEMES = ['auto', 'light', 'dark', 'sol'];
+const THEME_LABEL = { auto: 'Automático (como el teléfono)', light: 'Claro', dark: 'Oscuro', sol: 'Modo sol (alto contraste)' };
+const THEME_ICON = { auto: 'i-auto', light: 'i-sun', dark: 'i-moon', sol: 'i-solmax' };
+function applyTheme(t) {
+  const theme = THEMES.includes(t) ? t : 'auto';
+  if (theme === 'auto') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = theme;
+  const btn = document.getElementById('theme-btn');
+  if (btn) { btn.querySelector('use').setAttribute('href', '#' + THEME_ICON[theme]); btn.setAttribute('aria-label', 'Tema: ' + THEME_LABEL[theme] + '. Tocar para cambiar'); btn.dataset.theme = theme; }
+  // Status-bar color follows the top bar.
+  requestAnimationFrame(() => { const c = getComputedStyle(document.documentElement).getPropertyValue('--bar').trim(); document.querySelector('meta[name="theme-color"]')?.setAttribute('content', c || '#143d6b'); });
+}
+document.getElementById('theme-btn')?.addEventListener('click', async () => {
+  const cur = document.getElementById('theme-btn').dataset.theme || 'auto';
+  const next = THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length];
+  applyTheme(next);
+  try { await db.setSetting('theme', next); } catch (_) { /* ignore */ }
+  showBanner('theme', 'info', 'Tema: ' + THEME_LABEL[next], [{ label: 'OK', onClick: () => hideBanner('theme') }]);
+  setTimeout(() => hideBanner('theme'), 1800);
+  if (document.body.dataset.route === 'ajustes') render();
+});
+window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener?.('change', () => applyTheme(document.getElementById('theme-btn')?.dataset.theme || 'auto'));
 
 const h = { $app, $dlg, state, esc, ask, confirmDlg, showBanner, hideBanner, reportError, download, fmtBytes, storageInfo, storageHtml, navigate, refreshProject, requestPersistence };
 
@@ -155,11 +177,9 @@ async function viewSettings() {
         <option value="rapida"${cameraMode === 'rapida' ? ' selected' : ''}>Cámara rápida en la app — beta (varias fotos seguidas)</option>
       </select>
       <p class="muted small">La cámara rápida no sale de la app entre fotos. En iPhone la calidad es menor que la del sistema: para placas usa la del sistema.</p>
-      <label for="theme">Pantalla</label>
-      <select id="theme">
-        <option value="auto"${theme === 'auto' ? ' selected' : ''}>Automática (claro / oscuro del teléfono)</option>
-        <option value="sol"${theme === 'sol' ? ' selected' : ''}>Modo sol: alto contraste para exteriores</option>
-      </select>
+      <label for="theme">Tema de la pantalla</label>
+      <select id="theme">${THEMES.map((t) => `<option value="${t}"${theme === t ? ' selected' : ''}>${THEME_LABEL[t]}</option>`).join('')}</select>
+      <p class="muted small">También se cambia con el botón de la barra superior. <strong>Modo sol</strong>: máximo contraste para trabajar al aire libre.</p>
       <label class="switch"><input id="gps" type="checkbox"${gps ? ' checked' : ''}> Guardar ubicación GPS en cada activo</label>
       <p id="saved" class="ok" role="status"></p>
     </div>
@@ -194,21 +214,41 @@ async function viewSettings() {
 }
 
 function viewHelp() {
+  const step = (n, t, body) => `<li class="hstep"><span class="hnum">${n}</span><div><strong>${t}</strong><p class="muted small">${body}</p></div></li>`;
   $app.innerHTML = `
-    <h1>Ayuda</h1>
-    <div class="card"><h2 style="margin-top:0">Instalar en Android (Chrome)</h2>
-      <ol><li>Abre la dirección de la app en Chrome <strong>con internet</strong> (una sola vez).</li><li>Menú ⋮ → <strong>Instalar app</strong> / Añadir a pantalla de inicio.</li><li>Ábrela desde el ícono. Prueba en modo avión.</li></ol></div>
-    <div class="card"><h2 style="margin-top:0">Instalar en iPhone (Safari)</h2>
-      <ol><li>Abre la dirección en Safari.</li><li>Compartir → <strong>Añadir a pantalla de inicio</strong>.</li><li>Abre siempre desde el ícono (iOS 16.4 o superior). El almacenamiento en iOS es más restrictivo: exporta con frecuencia.</li></ol></div>
-    <div class="card"><h2 style="margin-top:0">Proyectos</h2><p class="muted">Cada proyecto (cliente o planta) tiene sus propios edificios, departamentos, activos y exportaciones. El proyecto activo se ve siempre arriba; tócalo para cambiarlo. Para que varios valuadores trabajen en el mismo proyecto, uno lo crea y comparte el <strong>paquete de proyecto</strong>; cada uno usa su propio código de valuador.</p></div>
-    <div class="card"><h2 style="margin-top:0">Exportar</h2><p class="muted">Menú <a href="#/exportar">Exportar</a>: genera ZIP por lotes para procesar en escritorio, y un respaldo completo.</p></div>`;
+    <h1>Guía rápida</h1>
+    <div class="card"><h2 class="hh">Primeros pasos</h2><ol class="hsteps">
+      ${step(1, 'Explora el Proyecto Test', 'La primera vez se carga un proyecto de prueba con edificios, activos y fotos de ejemplo. Úsalo para practicar: no afecta tus datos.')}
+      ${step(2, 'Crea tu proyecto', 'Toca el nombre del proyecto (arriba) → <strong>+ Nuevo proyecto</strong>: nombre, unidades y tu <strong>código de valuador</strong> (2–3 letras, p. ej. GA).')}
+      ${step(3, 'Carga los edificios', '<strong>Edificios → Importar Excel</strong> con la plantilla o el archivo fuente. También puedes crearlos al vuelo desde un activo.')}
+      ${step(4, 'Comparte el proyecto con tu equipo', 'Proyectos → <strong>Compartir paquete</strong>. Cada valuador lo importa y usa su propio código.')}
+    </ol></div>
+    <div class="card"><h2 class="hh">Registrar un activo (en planta)</h2><ol class="hsteps">
+      ${step(1, '+ Nuevo activo', 'Elige edificio, piso y departamento (se recuerdan para el siguiente).')}
+      ${step(2, '📷 Foto y 🔎 Placa', 'Vista general con <strong>Foto</strong>; la placa de datos con <strong>Placa</strong> (se guarda a máxima resolución). Toca una foto para marcarla General / Placa / Detalle.')}
+      ${step(3, '🎙 Voz y notas', 'Dicta lo que veas (marca, estado, capacidad). Puedes pausar y seguir. Las notas de texto son opcionales.')}
+      ${step(4, '✓ Guardar y nuevo', 'Pantalla verde con el ID (p. ej. B1-GA-A001). Arriba queda “Anterior guardado” con <strong>Copiar</strong> para equipos iguales.')}
+    </ol></div>
+    <div class="card"><h2 class="hh">Edificios</h2><p class="muted small">Formulario con las columnas del Excel de levantamiento, listas y “Otro valor”. Las áreas aceptan operaciones (<code>45.5*10.5 + 20*30</code>) en m² o ft². Con al menos una foto, <strong>Marcar inspeccionado</strong>. Los contadores muestran pendientes, en proceso e inspeccionados.</p></div>
+    <div class="card"><h2 class="hh">Exportar y compartir</h2><p class="muted small"><strong>Exportar para IA</strong>: ZIP por edificio → activo con índice e instrucciones (README_IA). Por defecto solo lo nuevo. En Android: Descargar y adjuntar desde WhatsApp/Teams (Documento → Descargas).<br><strong>📄 Reporte</strong>: PDF de avance, se comparte directo.<br><strong>Respaldo</strong>: copia completa para recuperar datos; guárdala fuera del teléfono.</p></div>
+    <div class="card"><h2 class="hh">Consejos de campo</h2><ul class="muted small hlist">
+      <li>Funciona <strong>sin señal</strong>. Ábrela una vez con internet tras instalar o actualizar.</li>
+      <li>Al sol: botón de tema (arriba a la derecha) → <strong>Modo sol</strong>.</li>
+      <li>Exporta o respalda al final del día: la app te avisa si hay muchos activos solo en el teléfono.</li>
+      <li>Placas difíciles: usa la cámara del sistema, acércate y toma 2 fotos.</li>
+    </ul></div>
+    <div class="card"><h2 class="hh">Instalar</h2><p class="muted small"><strong>Android (Chrome):</strong> menú ⋮ → <strong>Instalar app</strong>. <strong>iPhone (Safari):</strong> Compartir → <strong>Añadir a pantalla de inicio</strong>. Abre siempre desde el ícono.</p>
+      <p class="muted small">Versión ${esc(APP_VERSION)}</p></div>`;
 }
 
 // ---------- service worker ----------
 function setupServiceWorker() {
   if (!('serviceWorker' in navigator)) { showBanner('sw', 'warn', 'Este navegador no soporta modo offline (service worker).'); return; }
   let reloading = false;
-  navigator.serviceWorker.addEventListener('controllerchange', () => { if (reloading) return; reloading = true; location.reload(); });
+  // Reload only when a NEW version takes over. On the very first install there is no previous controller:
+  // reloading then would interrupt the first boot (e.g. while the demo project is being created).
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (reloading || !hadController) return; reloading = true; location.reload(); });
   const offerUpdate = (reg) => showBanner('update', 'info', 'Hay una nueva versión.', [{ label: 'Actualizar', onClick: () => reg.waiting?.postMessage({ type: 'SKIP_WAITING' }) }]);
   navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).then((reg) => {
     if (reg.waiting && navigator.serviceWorker.controller) offerUpdate(reg);
@@ -229,6 +269,20 @@ async function boot() {
     state.deviceId = await db.ensureDeviceId();
     applyTheme(await db.getSetting('theme', 'auto'));
     await refreshProject();
+    // First install: create the demo project so the app can be explored with data before going to the field.
+    let skipDemo = false; try { skipDemo = localStorage.getItem('no_demo') === '1'; } catch (_) { /* ignore */ }
+    // A demo whose creation was interrupted (app closed mid-way) is removed and created again.
+    const projectsNow = await db.getAll('projects');
+    const brokenDemo = !(await db.getSetting('demo_seeded', false)) && projectsNow.length && projectsNow.every((p) => p.demo);
+    if (!skipDemo && (brokenDemo || (!state.project && !(await db.getSetting('demo_seeded', false)) && !projectsNow.length))) {
+      showBanner('demo', 'info', 'Preparando el proyecto de prueba…');
+      try {
+        const { seedDemo, deleteProjectData } = await import('./demo.js');
+        for (const p of projectsNow) if (p.demo) await deleteProjectData(p.id);
+        await seedDemo({ inspector: await db.getSetting('inspector', ''), deviceId: state.deviceId });
+        await refreshProject();
+      } catch (e) { console.error(e); } finally { hideBanner('demo'); }
+    }
     if (migrated) showBanner('migr', 'info', `Tus datos se movieron al proyecto “${esc(state.project?.name || 'Proyecto 1')}”. Cámbiale el nombre y define tu código de valuador.`, [{ label: 'Editar proyecto', onClick: () => { hideBanner('migr'); navigate('#/proyectos'); } }, { label: 'OK', onClick: () => hideBanner('migr') }]);
     state.persisted = await requestPersistence();
     try { const n = await recoverOrphanAudio(); if (n) showBanner('audio-rec', 'info', `Se recuperaron ${n} nota(s) de voz de una grabación interrumpida.`, [{ label: 'OK', onClick: () => hideBanner('audio-rec') }]); } catch (e) { console.error(e); }

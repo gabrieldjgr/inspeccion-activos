@@ -18,7 +18,8 @@ const SETTINGS_V2 = ['inspector', 'photo_quality', 'gps_enabled', 'seq_counter',
 // Strips the Blob and adds file names; keeps uid, order and all metadata.
 const metaOf = (rec, file) => { const { blob, ...rest } = rec; return { ...rest, file }; };
 
-export async function exportBackup(h, onProgress) {
+// opts.projectId: only that project (v2). Without it: every project on this phone.
+export async function exportBackup(h, onProgress, { projectId = null } = {}) {
   const nowD = new Date();
   const version = await db.currentVersion();
   const deviceId = h.state.deviceId || (await db.getSetting('device_id', null));
@@ -26,10 +27,13 @@ export async function exportBackup(h, onProgress) {
   const keys = version < 2 ? SETTINGS_V1 : SETTINGS_V2;
   const settings = {};
   for (const k of keys) { const v = await db.getSetting(k, undefined); if (v !== undefined) settings[k] = v; }
-  const [buildings, departments, assets] = await Promise.all([db.getAll('buildings'), db.getAll('departments'), db.getAll('assets')]);
+  const one = version >= 2 && projectId;
+  const load = (store) => (one ? db.getByProject(store, projectId) : db.getAll(store));
+  const [buildings, departments, assets] = await Promise.all([load('buildings'), load('departments'), load('assets')]);
+  const projects = version < 2 ? [] : one ? [await db.get('projects', projectId)].filter(Boolean) : await db.getAll('projects');
   const head = version < 2
     ? { schema_version: 1, app_version: APP_VERSION, exported_at: nowIso(nowD), n_assets: assets.length, edificios: buildings, departamentos: departments, settings }
-    : { schema_version: 2, app_version: APP_VERSION, exported_at: nowIso(nowD), n_assets: assets.length, proyectos: await db.getAll('projects'), edificios: buildings, departamentos: departments, listas: await db.getAll('lists'), settings };
+    : { schema_version: 2, app_version: APP_VERSION, exported_at: nowIso(nowD), scope: one ? 'project' : 'all', n_assets: assets.length, proyectos: projects, edificios: buildings, departamentos: departments, listas: await load('lists'), settings };
   const w = createZipWriter();
   w.addText('backup.json', JSON.stringify(head, null, 2));
   assets.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
@@ -65,7 +69,8 @@ export async function exportBackup(h, onProgress) {
   const chunks = await w.finish();
   const blob = new Blob(chunks, { type: 'application/zip' });
   chunks.length = 0;
-  return { blob, name: `respaldo_${device8}_${fileStamp(nowD)}.zip`, nAssets: assets.length };
+  const who = one ? 'proyecto-' + String(projects[0]?.name || 'x').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\w]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase().slice(0, 30) : device8;
+  return { blob, name: `respaldo_${who}_${fileStamp(nowD)}.zip`, nAssets: assets.length };
 }
 
 // Merge the master data of a backup into the DB. Returns { buildingIdFor(asset), projectIdFor(asset) }.
@@ -218,13 +223,14 @@ export async function viewExport($app, h) {
   const nDrafts = (await db.countByProject('assets', pid)) - s0.total;
 
   $app.innerHTML = `
-    <h1>Exportar <span class="muted h1-sub">${esc(h.state.project.name)}</span></h1>
+    <h1>Exportar</h1>
     <div class="card">
       <dl class="kv">
         <dt>Activos guardados</dt><dd id="x-total">${s0.total}</dd>
         <dt>Pendientes de exportar</dt><dd id="x-pending"><strong>${s0.pending}</strong></dd>
         <dt>Ya exportados</dt><dd id="x-done">${s0.exported}</dd>
       </dl>
+      <p class="muted small" id="x-space"></p>
       ${nDrafts ? `<p class="muted">${nDrafts} borrador${nDrafts === 1 ? '' : 'es'} sin guardar no se exportan en el ZIP (sí van en el respaldo completo).</p>` : ''}
     </div>
     <div class="card">
@@ -269,8 +275,10 @@ export async function viewExport($app, h) {
       <p id="x-pmsg" role="status"></p>
     </div>
     <div class="card">
-      <h2 class="x-h">Respaldo completo</h2>
-      <p class="muted">Incluye <strong>todos los proyectos</strong> de este teléfono: activos (también borradores y exportados), edificios, departamentos y ajustes. Sirve para pasar los datos a otro teléfono o recuperarlos tras reinstalar. Se arma en un solo archivo: con muchas fotos puede requerir bastante memoria.</p>
+      <h2 class="x-h">Respaldo</h2>
+      <label for="x-bscope">Qué respaldar</label>
+      <select id="x-bscope"><option value="project">Solo este proyecto</option><option value="all">Todos los proyectos del teléfono</option></select>
+      <p class="muted small">Copia completa (activos, borradores, edificios, fotos, audios) para recuperar los datos si se pierde el teléfono o pasarlos a otro. Guárdala fuera del teléfono. Con muchas fotos puede tardar y usar bastante memoria.</p>
       <div class="row">
         <button class="btn" id="x-backup">Crear respaldo completo</button>
         <button class="btn" id="x-restore">Restaurar respaldo…</button>
@@ -288,6 +296,7 @@ export async function viewExport($app, h) {
     </div>`;
 
   const $ = (id) => document.getElementById(id);
+  import('./data.js').then(async ({ projectBytes }) => { const b = await projectBytes(pid); const el = $('x-space'); if (el) el.textContent = `Espacio usado por este proyecto: ${fmtBytes(b.total)} (fotos ${fmtBytes(b.photo)}, audios ${fmtBytes(b.audio)}).`; }).catch(() => {});
   const buttons = ['x-go', 'x-backup', 'x-restore', 'x-del', 'x-pdf', 'x-pdfdl'];
   const setBusy = (b) => { busy = b; buttons.forEach((i) => { $(i).disabled = b; }); };
   const say = (id, cls, text) => { const el = $(id); el.className = cls || ''; el.textContent = text; };
@@ -407,8 +416,11 @@ export async function viewExport($app, h) {
     if (busy) return;
     setBusy(true); $('x-bparts').innerHTML = ''; say('x-bmsg', '', '');
     try {
-      const r = await exportBackup(h, bprog);
-      say('x-bmsg', 'ok', `Respaldo listo (${r.nAssets} activos).`);
+      const r = await exportBackup(h, bprog, { projectId: $('x-bscope').value === 'project' ? pid : null });
+      say('x-bmsg', 'ok', `Respaldo listo (${r.nAssets} activos). Guárdalo fuera del teléfono.`);
+      const now = nowIso();
+      if ($('x-bscope').value === 'project') await db.setSetting(`last_backup|${pid}`, now);
+      else for (const p of await db.getAll('projects')) await db.setSetting(`last_backup|${p.id}`, now);
       addPartRow($('x-bparts'), r.name, r.blob);
     } catch (e) { console.error(e); say('x-bmsg', 'bad', failText(e)); } finally { setBusy(false); }
   };

@@ -93,6 +93,33 @@ export async function mediaIndex() {
   }));
   return out;
 }
+// Bytes used by photos/thumbs/audio of a set of owners (asset or building ids). Reads each blob record once
+// (Blob bodies stay on disk; only .size is read). Returns { photo, audio, other, total }.
+export async function mediaBytes(ownerIds) {
+  const owners = ownerIds instanceof Set ? ownerIds : new Set(ownerIds);
+  const out = { photo: 0, audio: 0, other: 0, total: 0 };
+  await db.tx('blobs', 'readonly', (s) => new Promise((resolve, reject) => {
+    const req = s.openCursor();
+    req.onsuccess = () => {
+      const c = req.result;
+      if (!c) { resolve(); return; }
+      const r = c.value;
+      if (owners.has(r.asset_id)) {
+        const n = r.blob?.size || 0;
+        if (r.kind === 'photo') out.photo += n; else if (r.kind === 'audio' || r.kind === 'audiochunk') out.audio += n; else out.other += n;
+        out.total += n;
+      }
+      c.continue();
+    };
+    req.onerror = () => reject(req.error);
+  }));
+  return out;
+}
+export async function projectBytes(projectId) {
+  const [a, b] = await Promise.all([db.getByProject('assets', projectId), db.getByProject('buildings', projectId)]);
+  return mediaBytes(new Set([...a.map((x) => x.id), ...b.map((x) => x.id)]));
+}
+
 const EMPTY_COUNTS = Object.freeze({ photo: 0, audio: 0, chunk: 0, thumbKey: null });
 export const countsOf = (index, id) => index.get(id) || EMPTY_COUNTS;
 

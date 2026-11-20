@@ -1,7 +1,7 @@
 // Projects (v0.3): data helpers, active project, project package (share setup between valuers) and views.
 import * as db from './db.js';
 import { APP_VERSION } from './version.js';
-import { nowIso } from './data.js';
+import { nowIso, projectBytes } from './data.js';
 
 export const PACKAGE_FORMAT = 'inspeccion-activos/proyecto';
 export const UNITS = { imperial: 'Imperial (ft, ft²)', metric: 'Métrico (m, m²)' };
@@ -42,7 +42,7 @@ export async function createProject(f, { id } = {}) {
   const now = nowIso();
   const p = {
     schema_version: 1, id: id || crypto.randomUUID(), name: db.cleanText(f.name), client: db.cleanText(f.client), site: db.cleanText(f.site),
-    units: f.units || 'imperial', valuer_code: f.valuer_code || '', status: 'active', created_at: now, updated_at: now, last_context: null
+    units: f.units || 'imperial', valuer_code: f.valuer_code || '', status: 'active', created_at: now, updated_at: now, last_context: null, ...(f.demo ? { demo: true } : {})
   };
   await db.put('projects', p);
   return p;
@@ -191,21 +191,23 @@ export async function viewProjects(h) {
   const [all, active] = await Promise.all([listProjects(), getActiveProject()]);
   const live = all.filter((p) => p.status !== 'archived');
   const archived = all.filter((p) => p.status === 'archived');
-  const stats = new Map(await Promise.all(all.map(async (p) => [p.id, await projectStats(p.id)])));
+  const stats = new Map(await Promise.all(all.map(async (p) => [p.id, { ...(await projectStats(p.id)), bytes: (await projectBytes(p.id)).total, lastBackup: await db.getSetting(`last_backup|${p.id}`, null) }])));
   const card = (p) => {
     const s = stats.get(p.id);
     const isActive = active && active.id === p.id;
     return `<li class="proj${isActive ? ' current' : ''}${p.status === 'archived' ? ' archived' : ''}">
-      <div class="proj-head"><strong>${h.esc(p.name)}</strong>${isActive ? '<span class="chip done">activo</span>' : ''}${p.status === 'archived' ? '<span class="chip">archivado</span>' : ''}</div>
+      <div class="proj-head"><strong>${h.esc(p.name)}</strong>${p.demo ? '<span class="chip demo">DEMO</span>' : ''}${isActive ? '<span class="chip done">activo</span>' : ''}${p.status === 'archived' ? '<span class="chip">archivado</span>' : ''}</div>
       <div class="muted">${h.esc([p.client, p.site].filter(Boolean).join(' · ') || 'Sin cliente ni ubicación')}</div>
-      <div class="chips"><span class="chip">🏢 ${s.nBuildings} edificios</span><span class="chip">📦 ${s.nAssets} activos</span>${s.nDrafts ? `<span class="chip pending">${s.nDrafts} borrador${s.nDrafts === 1 ? '' : 'es'}</span>` : ''}<span class="chip">${p.units === 'metric' ? 'm²' : 'ft²'}</span><span class="chip">${p.valuer_code ? 'Valuador ' + h.esc(p.valuer_code) : '⚠ sin código de valuador'}</span></div>
+      <div class="chips"><span class="chip">🏢 ${s.nBuildings} edificios</span><span class="chip">📦 ${s.nAssets} activos</span>${s.nDrafts ? `<span class="chip pending">${s.nDrafts} borrador${s.nDrafts === 1 ? '' : 'es'}</span>` : ''}<span class="chip">${p.units === 'metric' ? 'm²' : 'ft²'}</span><span class="chip">${p.valuer_code ? 'Valuador ' + h.esc(p.valuer_code) : '⚠ sin código de valuador'}</span><span class="chip">💾 ${h.fmtBytes(s.bytes)}</span></div>
+      <div class="muted small">${s.lastBackup ? 'Último respaldo: ' + h.esc(new Date(s.lastBackup).toLocaleString('es', { dateStyle: 'medium', timeStyle: 'short' })) : 'Sin respaldo todavía'}</div>
       <div class="row proj-actions">
         ${p.status === 'archived'
           ? `<button class="btn" data-act="unarchive" data-id="${h.esc(p.id)}">Reactivar</button>`
           : `${isActive ? '' : `<button class="btn primary" data-act="use" data-id="${h.esc(p.id)}">Usar este proyecto</button>`}
              <button class="btn" data-act="edit" data-id="${h.esc(p.id)}">Editar</button>
-             <button class="btn" data-act="share" data-id="${h.esc(p.id)}">Compartir paquete</button>
-             <button class="btn danger" data-act="archive" data-id="${h.esc(p.id)}">Archivar</button>`}
+             ${p.demo ? '' : `<button class="btn" data-act="share" data-id="${h.esc(p.id)}">Compartir paquete</button>`}
+             <button class="btn" data-act="backup" data-id="${h.esc(p.id)}">Respaldo</button>
+             ${p.demo ? `<button class="btn danger" data-act="deldemo" data-id="${h.esc(p.id)}">Borrar proyecto de prueba</button>` : `<button class="btn danger" data-act="archive" data-id="${h.esc(p.id)}">Archivar</button>`}`}
       </div></li>`;
   };
   h.$app.innerHTML = `
@@ -220,6 +222,7 @@ export async function viewProjects(h) {
     ${live.length ? `<ul class="projects">${live.map(card).join('')}</ul>` : ''}
     ${archived.length ? `<button class="btn" id="pj-arch" style="width:100%">${showArchived ? '▾' : '▸'} Archivados (${archived.length})</button>
       ${showArchived ? `<ul class="projects">${archived.map(card).join('')}</ul>` : ''}` : ''}
+    ${all.some((p) => p.demo) ? '' : '<div class="row" style="margin-top:8px"><button class="btn" id="pj-demo">Cargar proyecto de prueba (con datos de ejemplo)</button></div>'}
     <div class="card"><p class="muted small"><strong>Paquete de proyecto:</strong> archivo con el proyecto, sus edificios, departamentos y listas (sin fotos ni activos). Compártelo con los demás valuadores para que todos trabajen sobre el mismo proyecto y los mismos códigos de edificio.</p></div>`;
 
   const $ = (s) => h.$app.querySelector(s);
@@ -231,6 +234,15 @@ export async function viewProjects(h) {
     await h.refreshProject();
     h.showBanner('proj', 'info', `Proyecto “${h.esc(p.name)}” creado y activo ✓`, [{ label: 'OK', onClick: () => h.hideBanner('proj') }]);
     h.navigate('#/');
+  };
+  const demoBtn = $('#pj-demo'); if (demoBtn) demoBtn.onclick = async () => {
+    demoBtn.disabled = true; demoBtn.textContent = 'Preparando…';
+    try {
+      const { seedDemo } = await import('./demo.js');
+      await seedDemo({ inspector: await db.getSetting('inspector', ''), deviceId: h.state.deviceId });
+      await h.refreshProject();
+      h.navigate('#/');
+    } catch (e) { h.reportError(e); demoBtn.disabled = false; }
   };
   const arch = $('#pj-arch'); if (arch) arch.onclick = () => { showArchived = !showArchived; viewProjects(h); };
   const $file = $('#pj-file');
@@ -271,6 +283,20 @@ export async function viewProjects(h) {
         const pkg = await buildPackage(id);
         const how = await shareOrDownload(h, pkg.blob, pkg.name);
         if (how === 'downloaded') h.showBanner('proj', 'info', `Se descargó ${h.esc(pkg.name)}. Envíalo a los demás valuadores (WhatsApp, Teams, correo…).`, [{ label: 'OK', onClick: () => h.hideBanner('proj') }]);
+      } else if (b.dataset.act === 'deldemo') {
+        if (!(await h.confirmDlg('Borrar proyecto de prueba', '<p>Se borran el proyecto de prueba y todos sus datos de ejemplo. Tus proyectos no se tocan. Puedes volver a cargarlo desde aquí.</p>', 'Borrar', 'danger'))) return;
+        const { deleteProjectData } = await import('./demo.js');
+        await deleteProjectData(id);
+        await h.refreshProject();
+        await viewProjects(h);
+      } else if (b.dataset.act === 'backup') {
+        const { exportBackup } = await import('./export.js');
+        h.showBanner('proj', 'info', 'Creando respaldo del proyecto…');
+        const r = await exportBackup(h, null, { projectId: id });
+        h.hideBanner('proj');
+        const how = await shareOrDownload(h, r.blob, r.name);
+        if (how !== 'cancelled') await db.setSetting(`last_backup|${id}`, nowIso());
+        if (how === 'downloaded') h.showBanner('proj', 'info', `Respaldo descargado: ${h.esc(r.name)}. Guárdalo fuera del teléfono (Drive, PC).`, [{ label: 'OK', onClick: () => h.hideBanner('proj') }]);
       } else if (b.dataset.act === 'archive') {
         const s = stats.get(id);
         if (!(await h.confirmDlg('Archivar proyecto', `<p>¿Archivar <strong>${h.esc(p.name)}</strong>? Se oculta de la lista pero <strong>no se borra nada</strong> (${s.nAssets} activos, ${s.nBuildings} edificios). Puedes reactivarlo cuando quieras.</p>`, 'Archivar'))) return;
