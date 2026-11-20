@@ -2,13 +2,14 @@
 
 App web instalable para registrar activos en campo, 100 % offline después de la primera carga. Sitio estático (HTML + CSS + JS, sin build) pensado para GitHub Pages. La especificación completa está en `BRIEF_App_Inspeccion_Activos.md`.
 
-**Estado: fases 1–6 implementadas (v0.2.1).** Verificado en navegador de escritorio: registro, contexto recordado, fotos (redimensión y miniaturas), exportación ZIP, respaldo/restauración y lista con 300 activos. **Sin probar aún en dispositivo real:** cámara nativa, micrófono, compartir y modo avión en el S21 Ultra (ver pruebas manuales abajo).
+**Estado: v0.3.0 — F0 (proyectos) del plan v0.3.** Sobre la base v0.2 (registro, fotos, audio, exportación ZIP, respaldo) se agregan proyectos, código de valuador, paquete de proyecto y la migración segura de los datos existentes. Verificado en Chromium de escritorio con pruebas automatizadas (migración v1→v2 con datos reales de v0.2.2, fallo simulado a mitad de la migración, aislamiento entre proyectos, paquetes y restauración de respaldos v1/v2). **Sin probar aún en dispositivo real:** cámara, micrófono, compartir y modo avión (ver pruebas manuales abajo).
 
 ## Estructura
 
 ```
 index.html  styles.css  manifest.webmanifest  sw.js  .nojekyll
 js/    app.js (rutas, ajustes, edificios) · assets.js (formulario, lista, departamentos) · data.js (contratos de datos)
+       projects.js (proyectos, paquete de proyecto) · migrate.js (pantalla de migración v1→v2)
        photos.js · audio.js · export.js · db.js (IndexedDB) · csv.js · version.js
 css/   photos.css · audio.css · export.css      vendor/ fflate.esm.js (ZIP, vendorizado)
 icons/ iconos PNG (any, maskable, apple-touch)
@@ -69,13 +70,23 @@ B-05,"Taller de Mantenimiento, Anexo"
 
 ## Modelo de datos (resumen)
 
-- `assets`: un registro por activo (`status` `draft` | `saved`). El borrador se autoguarda en cada cambio; el `seq` se asigna al guardar por primera vez.
+- `projects`: un registro por proyecto (nombre, cliente, planta, unidades, **código de valuador de este teléfono**, `status` `active` | `archived`, `last_context`). El proyecto activo está en `settings.active_project`.
+- `buildings` (clave uuid, código único por proyecto), `departments` (`{project_id}|{KEY}`) y `lists` (valores agregados por el usuario, F2) llevan `project_id`.
+- `assets`: un registro por activo, con `project_id` y `building_id` (`status` `draft` | `saved`). El borrador se autoguarda en cada cambio; el `seq` se asigna al guardar por primera vez.
 - `blobs`: fotos (`photo`), miniaturas (`thumb`), audios (`audio`) y trozos de grabación en curso (`audiochunk`). Los módulos de medios nunca escriben el registro del activo; `photos[]`/`audios[]` se arman al exportar.
-- Contexto recordado en `settings.last_context`. Un activo está "por exportar" si nunca se exportó o se editó después (`updated_at > exported_at`).
+- Contexto recordado por proyecto en `projects.last_context`. Un activo está "por exportar" si nunca se exportó o se editó después (`updated_at > exported_at`).
+
+## Proyectos y migración (v0.3)
+
+- Cada proyecto tiene sus edificios, departamentos, activos y exportaciones. El proyecto activo se ve siempre en la barra superior; tocarlo abre **Proyectos** (crear, editar, usar, archivar, reactivar). Archivar no borra nada.
+- **Código de valuador** (2–3 letras): se pide al crear el proyecto y va en los IDs de activo (`B1-GA-A001`, fase F1). Cada valuador del mismo proyecto usa uno distinto.
+- **Paquete de proyecto** (`proyecto_{nombre}.json`): proyecto + edificios + departamentos + listas, sin fotos, activos ni código de valuador. Un coordinador lo comparte y los demás lo importan en Proyectos → *Importar paquete*: todos quedan con el mismo id de proyecto y los mismos ids de edificio. Importarlo de nuevo solo agrega lo que falte.
+- **Migración desde v0.2:** al abrir la versión nueva con datos anteriores aparece *Actualización de datos*: 1) descargar respaldo (formato v0.2, se puede restaurar incluso en la versión anterior); 2) actualizar. Todo pasa a "Proyecto 1". La actualización es una única transacción: si falla, la base queda exactamente como estaba; las fotos y audios no se reescriben. Además se guarda una copia interna (`_v1_backup`) de edificios, departamentos y contexto.
+- **Respaldo completo** (Exportar): incluye todos los proyectos. Restaurar un respaldo v0.2 lo carga en el proyecto activo; uno v0.3 agrega proyectos/edificios que falten y fusiona activos por id (gana el más reciente).
 
 ## Formato del ZIP exportado
 
-`inspeccion_{device8}_{YYYYMMDD-HHmm}_parte{n}.zip` con `manifest.json`, `activos.csv` (UTF-8 con BOM), `activos.json`, `edificios.csv` y `activos/{BLDG}_{seq4}_{uuid8}/` con `activo.json`, `foto_NN.jpg`, `captura_NN.png`, `audio_NN.webm|m4a` y `notas.txt`. Se parte en varios ZIP según el tamaño máximo elegido. El respaldo completo (`respaldo_*.zip`) se restaura desde Exportar → *Restaurar respaldo*.
+`inspeccion_{proyecto}_{device8}_{YYYYMMDD-HHmm}_parte{n}.zip` con `manifest.json` (con `project` y `valuer_code`), `activos.csv` (UTF-8 con BOM), `activos.json`, `edificios.csv` y `activos/{BLDG}_{seq4}_{uuid8}/` con `activo.json`, `foto_NN.jpg`, `captura_NN.png`, `audio_NN.webm|m4a` y `notas.txt`. Se parte en varios ZIP según el tamaño máximo elegido. El respaldo completo (`respaldo_*.zip`) se restaura desde Exportar → *Restaurar respaldo*.
 
 ## Transcribir las notas de voz (escritorio)
 
@@ -98,3 +109,13 @@ La app solo graba los audios. Para transcribirlos en tu PC (Whisper local, espa�
 5. Exportar 50 activos con fotos: abrir el ZIP en Windows; `activos.csv` en Excel con acentos correctos; probar *Compartir*.
 6. Crear respaldo, borrar datos del sitio y restaurar.
 7. iPhone (Safari 16.4+): mismo flujo; audio sale como `.m4a`.
+
+## Pruebas manuales — v0.3 F0 (proyectos y migración)
+
+1. **Con datos de v0.2 en el teléfono** (no borres nada): actualizar la app → aparece *Actualización de datos* con el conteo de activos, fotos y audios. *Descargar respaldo*, guardarlo fuera del teléfono, *Actualizar mis datos*. Comprobar que la lista muestra los mismos activos con sus miniaturas, que las fotos y audios abren y que el borrador pendiente (si había) sigue.
+2. En **Proyectos**: renombrar "Proyecto 1", poner tu código de valuador. Crear un segundo proyecto: su lista de activos, edificios y departamentos debe estar vacía. Volver al primero: todo sigue, y *Nuevo activo* recuerda el último edificio/piso/departamento de ese proyecto.
+3. El nombre del proyecto activo se ve siempre arriba; tocarlo abre Proyectos.
+4. *Compartir paquete* → enviarlo por WhatsApp a otro teléfono → *Importar paquete de proyecto* → pide el código de valuador → aparecen los mismos edificios.
+5. Archivar el proyecto activo: la app pide elegir otro; reactivarlo desde *Archivados*.
+6. Exportar ZIP: el nombre incluye el proyecto y solo trae activos de ese proyecto.
+7. Modo avión: crear un proyecto y un activo sin conexión.

@@ -3,11 +3,13 @@ import * as db from './db.js';
 import { parseBuildingsCsv, buildingsToCsv } from './csv.js';
 import * as assetsUi from './assets.js';
 import { recoverOrphanAudio } from './audio.js';
+import * as projects from './projects.js';
+import { runMigrationGate } from './migrate.js';
 
 const $app = document.getElementById('app');
 const $banners = document.getElementById('banners');
 const $dlg = document.getElementById('dlg');
-const state = { deviceId: null, persisted: null };
+const state = { deviceId: null, persisted: null, project: null };
 
 // ---------- helpers ----------
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -55,12 +57,23 @@ const routes = {
   activo: (p) => assetsUi.viewAssetForm(h, p.get('id')),
   departamentos: () => assetsUi.viewDepartments(h),
   exportar: async () => (await import('./export.js')).viewExport($app, h),
+  proyectos: () => projects.viewProjects(h),
   edificios: viewBuildings, ajustes: viewSettings, ayuda: viewHelp
 };
+const NO_PROJECT_OK = new Set(['proyectos', 'ajustes', 'ayuda']);
+// Renders are serialized: if the hash changes while a (slow) view is still loading, render again afterwards
+// so a late view never overwrites the one the user navigated to.
+let rendering = null; let renderAgain = false;
 async function render() {
+  if (rendering) { renderAgain = true; return rendering; }
+  rendering = (async () => { do { renderAgain = false; await renderOnce(); } while (renderAgain); })();
+  try { await rendering; } finally { rendering = null; }
+}
+async function renderOnce() {
   assetsUi.leave();
   const [path, query = ''] = location.hash.replace(/^#\/?/, '').split('?');
-  const route = path || '';
+  let route = path || '';
+  if (!state.project && !NO_PROJECT_OK.has(route)) route = 'proyectos'; // everything else needs an active project
   document.body.dataset.route = route;
   document.querySelectorAll('.topnav a').forEach((a) => a.classList.toggle('active', a.dataset.route === route));
   try { await (routes[route] || routes[''])(new URLSearchParams(query)); } catch (e) { reportError(e); }
@@ -95,7 +108,21 @@ function storageHtml(i) {
   return `<dl class="kv"><dt>Almacenamiento persistente</dt><dd>${p}</dd><dt>Espacio usado</dt><dd>${usage}</dd></dl>`;
 }
 
-const h = { $app, $dlg, state, esc, ask, confirmDlg, showBanner, hideBanner, reportError, download, fmtBytes, storageInfo, storageHtml, navigate };
+// Re-read the active project (after creating, switching, editing or archiving) and repaint the header chip.
+async function refreshProject() {
+  state.project = await projects.getActiveProject();
+  paintProjectChip();
+  return state.project;
+}
+function paintProjectChip() {
+  const el = document.getElementById('proj-chip');
+  if (!el) return;
+  const p = state.project;
+  el.innerHTML = p ? `<small>Proyecto</small><strong>${esc(p.name)}</strong>` : '<small>Proyecto</small><strong>Elegir proyecto</strong>';
+  el.classList.toggle('none', !p);
+}
+
+const h = { $app, $dlg, state, esc, ask, confirmDlg, showBanner, hideBanner, reportError, download, fmtBytes, storageInfo, storageHtml, navigate, refreshProject, requestPersistence };
 
 // ---------- views ----------
 async function viewSettings() {
@@ -123,6 +150,7 @@ async function viewSettings() {
       <h2 style="margin-top:0">Acerca de</h2>
       <dl class="kv"><dt>Versión</dt><dd>${esc(APP_VERSION)}</dd><dt>ID de dispositivo</dt><dd>${esc(state.deviceId)}</dd></dl>
       <p><button class="btn" id="check-update">Buscar actualización</button></p>
+      <p><a href="#/proyectos">Administrar proyectos →</a></p>
       <p><a href="#/edificios">Administrar edificios →</a></p>
       <p><a href="#/departamentos">Administrar departamentos →</a></p>
     </div>`;
@@ -141,10 +169,13 @@ async function viewSettings() {
   });
 }
 
+const byCode = (a, b) => a.code.localeCompare(b.code, 'es', { numeric: true });
+const projectBuildings = async () => (await db.getByProject('buildings', state.project.id)).sort(byCode);
+
 async function viewBuildings() {
-  const rows = (await db.getAll('buildings')).sort((a, b) => a.code.localeCompare(b.code, 'es', { numeric: true }));
+  const rows = await projectBuildings();
   $app.innerHTML = `
-    <h1>Edificios</h1>
+    <h1>Edificios <span class="muted h1-sub">${esc(state.project.name)}</span></h1>
     <div class="card">
       <p class="muted">CSV con exactamente 2 columnas: <code>BLDG #</code> y <code>BLDG NAME</code> (separador , o ;).</p>
       <div class="row">
@@ -156,14 +187,14 @@ async function viewBuildings() {
     </div>
     <div class="card">
       <strong>${rows.length} edificio${rows.length === 1 ? '' : 's'}</strong>
-      ${rows.length ? `<ul class="list">${rows.map((r) => `<li><span class="code">${esc(r.code)}</span><span class="name">${esc(r.name)}</span><button class="btn" data-edit="${esc(r.code)}">Editar</button></li>`).join('')}</ul>` : '<p class="muted">Aún no hay edificios. Importa un CSV o agrega uno.</p>'}
+      ${rows.length ? `<ul class="list">${rows.map((r) => `<li><span class="code">${esc(r.code)}</span><span class="name">${esc(r.name)}</span><button class="btn" data-edit="${esc(r.id)}">Editar</button></li>`).join('')}</ul>` : '<p class="muted">Aún no hay edificios. Importa un CSV o agrega uno.</p>'}
     </div>`;
   const $file = document.getElementById('file');
   document.getElementById('import').onclick = () => { $file.value = ''; $file.click(); };
   $file.onchange = () => importCsv($file.files[0]);
   document.getElementById('add').onclick = () => editBuilding(null);
   document.getElementById('export').onclick = () => download('edificios.csv', new Blob([buildingsToCsv(rows)], { type: 'text/csv;charset=utf-8' }));
-  $app.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => editBuilding(rows.find((r) => r.code === b.dataset.edit))));
+  $app.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => editBuilding(rows.find((r) => r.id === b.dataset.edit))));
 }
 
 async function importCsv(file) {
@@ -174,7 +205,7 @@ async function importCsv(file) {
       await ask('No se pudo importar', `<ul>${res.errors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul>`, [{ label: 'Cerrar', value: null, cls: 'primary' }]);
       return;
     }
-    const existing = await db.getAll('buildings');
+    const existing = await projectBuildings();
     let body = `<p>Se leyeron <strong>${res.rows.length}</strong> edificios${res.encoding === 'windows-1252' ? ' (archivo en codificación ANSI/Windows-1252)' : ''}.</p>`;
     if (res.duplicates.length) body += `<p class="bad">Códigos BLDG # duplicados (se conservó la primera aparición): ${res.duplicates.map((d) => `${esc(d.code)} (fila ${d.line})`).join(', ')}.</p>`;
     if (res.errors.length) body += `<p class="bad">Filas omitidas:</p><ul>${res.errors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul>`;
@@ -184,13 +215,16 @@ async function importCsv(file) {
       : [{ label: 'Importar', value: 'replace', cls: 'primary' }, { label: 'Cancelar', value: null }];
     const choice = await ask('Importar edificios', body, buttons);
     if (!choice) return;
+    const pid = state.project.id;
+    const now = db.nowIso();
+    const fresh = (r) => ({ id: crypto.randomUUID(), project_id: pid, code: r.code, code_key: db.normKey(r.code), name: r.name, source: 'import', created_at: now, updated_at: now });
     if (choice === 'merge') {
       // Match existing codes case-insensitively so "b-01" updates "B-01" instead of creating a twin.
-      const byKey = new Map(existing.map((e) => [db.normKey(e.code), e.code]));
-      const toPut = res.rows.map((r) => ({ code: byKey.get(db.normKey(r.code)) ?? r.code, name: r.name }));
-      await db.putMany('buildings', toPut);
+      const byKey = new Map(existing.map((e) => [e.code_key, e]));
+      await db.putMany('buildings', res.rows.map((r) => { const e = byKey.get(db.normKey(r.code)); return e ? { ...e, name: r.name, updated_at: now } : fresh(r); }));
     } else {
-      await db.putMany('buildings', res.rows, { clearFirst: true });
+      await db.deleteByProject('buildings', pid);
+      await db.putMany('buildings', res.rows.map(fresh));
     }
     showBanner('imp', 'info', 'Edificios importados ✓', [{ label: 'OK', onClick: () => hideBanner('imp') }]);
     await viewBuildings();
@@ -200,7 +234,7 @@ async function importCsv(file) {
 async function editBuilding(b) {
   const isNew = !b;
   $dlg.innerHTML = `<h2 style="margin-top:0">${isNew ? 'Agregar edificio' : 'Editar edificio'}</h2>
-    <label for="b-code">BLDG #</label><input id="b-code" type="text" value="${esc(b?.code ?? '')}"${isNew ? '' : ' readonly'}>
+    <label for="b-code">BLDG #</label><input id="b-code" type="text" value="${esc(b?.code ?? '')}"${isNew ? '' : ' readonly'} autocapitalize="characters">
     <label for="b-name">BLDG NAME</label><input id="b-name" type="text" value="${esc(b?.name ?? '')}">
     <p id="b-err" class="bad" role="alert"></p>
     <div class="actions"><button class="btn primary" id="b-save">Guardar</button>${isNew ? '' : '<button class="btn danger" id="b-del">Borrar edificio</button>'}<button class="btn" id="b-cancel">Cancelar</button></div>`;
@@ -213,11 +247,14 @@ async function editBuilding(b) {
     const err = document.getElementById('b-err');
     if (!code || !name) { err.textContent = 'Completa ambos campos.'; return; }
     try {
+      const now = db.nowIso();
       if (isNew) {
-        const all = await db.getAll('buildings');
-        if (all.some((x) => db.normKey(x.code) === db.normKey(code))) { err.textContent = 'Ya existe un edificio con ese BLDG #.'; return; }
+        const all = await projectBuildings();
+        if (all.some((x) => x.code_key === db.normKey(code))) { err.textContent = 'Ya existe un edificio con ese BLDG # en este proyecto.'; return; }
+        await db.put('buildings', { id: crypto.randomUUID(), project_id: state.project.id, code, code_key: db.normKey(code), name, source: 'manual', created_at: now, updated_at: now });
+      } else {
+        await db.put('buildings', { ...b, name, updated_at: now });
       }
-      await db.put('buildings', { code, name });
       $dlg.close(); await viewBuildings();
     } catch (e) { err.textContent = 'Error: ' + e.message; }
   };
@@ -225,7 +262,7 @@ async function editBuilding(b) {
   if (del) del.onclick = async () => {
     $dlg.close();
     if (await confirmDlg('Borrar edificio', `<p>¿Borrar <strong>${esc(b.code)}</strong> (${esc(b.name)})? Los activos ya registrados conservan su copia del nombre.</p>`, 'Borrar', 'danger')) {
-      try { await db.del('buildings', b.code); await viewBuildings(); } catch (e) { reportError(e); }
+      try { await db.del('buildings', b.id); await viewBuildings(); } catch (e) { reportError(e); }
     }
   };
 }
@@ -237,6 +274,7 @@ function viewHelp() {
       <ol><li>Abre la dirección de la app en Chrome <strong>con internet</strong> (una sola vez).</li><li>Menú ⋮ → <strong>Instalar app</strong> / Añadir a pantalla de inicio.</li><li>Ábrela desde el ícono. Prueba en modo avión.</li></ol></div>
     <div class="card"><h2 style="margin-top:0">Instalar en iPhone (Safari)</h2>
       <ol><li>Abre la dirección en Safari.</li><li>Compartir → <strong>Añadir a pantalla de inicio</strong>.</li><li>Abre siempre desde el ícono (iOS 16.4 o superior). El almacenamiento en iOS es más restrictivo: exporta con frecuencia.</li></ol></div>
+    <div class="card"><h2 style="margin-top:0">Proyectos</h2><p class="muted">Cada proyecto (cliente o planta) tiene sus propios edificios, departamentos, activos y exportaciones. El proyecto activo se ve siempre arriba; tócalo para cambiarlo. Para que varios valuadores trabajen en el mismo proyecto, uno lo crea y comparte el <strong>paquete de proyecto</strong>; cada uno usa su propio código de valuador.</p></div>
     <div class="card"><h2 style="margin-top:0">Exportar</h2><p class="muted">Menú <a href="#/exportar">Exportar</a>: genera ZIP por lotes para procesar en escritorio, y un respaldo completo.</p></div>`;
 }
 
@@ -261,7 +299,10 @@ async function boot() {
   db.onDbEvent('versionchange', () => showBanner('db', 'warn', 'La app se actualizó en otra pestaña. Recarga para continuar.', [{ label: 'Recargar', onClick: () => location.reload() }]));
   setupServiceWorker();
   try {
+    const migrated = await runMigrationGate(h); // v1 data: offers a backup, then upgrades the DB
     state.deviceId = await db.ensureDeviceId();
+    await refreshProject();
+    if (migrated) showBanner('migr', 'info', `Tus datos se movieron al proyecto “${esc(state.project?.name || 'Proyecto 1')}”. Cámbiale el nombre y define tu código de valuador.`, [{ label: 'Editar proyecto', onClick: () => { hideBanner('migr'); navigate('#/proyectos'); } }, { label: 'OK', onClick: () => hideBanner('migr') }]);
     state.persisted = await requestPersistence();
     try { const n = await recoverOrphanAudio(); if (n) showBanner('audio-rec', 'info', `Se recuperaron ${n} nota(s) de voz de una grabación interrumpida.`, [{ label: 'OK', onClick: () => hideBanner('audio-rec') }]); } catch (e) { console.error(e); }
     let dismissed = false; try { dismissed = localStorage.getItem('persist_dismissed') === '1'; } catch (_) { /* ignore */ }

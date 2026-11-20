@@ -48,20 +48,22 @@ function pick(h, { title, items, newLabel, current }) {
 }
 
 // ---------- departments ----------
-export async function addDepartment(name) {
+export async function addDepartment(projectId, name) {
   const clean = db.cleanText(name);
   const key = db.normKey(clean);
   if (!key) return null;
-  const existing = await db.get('departments', key);
+  const id = db.departmentId(projectId, key);
+  const existing = await db.get('departments', id);
   if (existing) return existing.name;
-  await db.put('departments', { key, name: clean });
+  await db.put('departments', { id, project_id: projectId, key, name: clean });
   return clean;
 }
-const listDepartments = async () => (await db.getAll('departments')).sort((a, b) => a.name.localeCompare(b.name, 'es'));
+const listDepartments = async (projectId) => (await db.getByProject('departments', projectId)).sort((a, b) => a.name.localeCompare(b.name, 'es'));
 
 export async function viewDepartments(h) {
   leave();
-  const rows = await listDepartments();
+  const pid = h.state.project.id;
+  const rows = await listDepartments(pid);
   h.$app.innerHTML = `
     <h1>Departamentos</h1>
     <div class="card">
@@ -74,7 +76,7 @@ export async function viewDepartments(h) {
       <input id="d-file" class="sr" type="file" accept=".csv,text/csv,text/plain" tabindex="-1">
     </div>
     <div class="card"><strong>${rows.length} departamento${rows.length === 1 ? '' : 's'}</strong>
-      ${rows.length ? `<ul class="list">${rows.map((r) => `<li><span class="name">${h.esc(r.name)}</span><button class="btn danger" data-del="${h.esc(r.key)}">Borrar</button></li>`).join('')}</ul>` : '<p class="muted">Aún no hay departamentos.</p>'}
+      ${rows.length ? `<ul class="list">${rows.map((r) => `<li><span class="name">${h.esc(r.name)}</span><button class="btn danger" data-del="${h.esc(r.id)}">Borrar</button></li>`).join('')}</ul>` : '<p class="muted">Aún no hay departamentos.</p>'}
     </div>`;
   const $file = h.$app.querySelector('#d-file');
   h.$app.querySelector('#d-import').onclick = () => { $file.value = ''; $file.click(); };
@@ -83,14 +85,14 @@ export async function viewDepartments(h) {
     try {
       const res = parseDepartmentsCsv(await f.arrayBuffer());
       if (res.errors.length && !res.names.length) { await h.ask('No se pudo importar', `<ul>${res.errors.map((e) => `<li>${h.esc(e)}</li>`).join('')}</ul>`, [{ label: 'Cerrar', value: null, cls: 'primary' }]); return; }
-      for (const n of res.names) await addDepartment(n);
+      for (const n of res.names) await addDepartment(pid, n);
       h.showBanner('imp', 'info', `Se procesaron ${res.names.length} departamentos ✓ (los existentes no se duplican)`, [{ label: 'OK', onClick: () => h.hideBanner('imp') }]);
       await viewDepartments(h);
     } catch (e) { h.reportError(e); }
   };
   h.$app.querySelector('#d-add').onclick = async () => {
     const r = await pick(h, { title: 'Nuevo departamento', items: [], newLabel: 'Crear departamento' });
-    if (r?.created) { await addDepartment(r.created); await viewDepartments(h); }
+    if (r?.created) { await addDepartment(pid, r.created); await viewDepartments(h); }
   };
   h.$app.querySelector('#d-export').onclick = () => h.download('departamentos.csv', new Blob(['﻿DEPARTMENT\r\n' + rows.map((r) => csvEscape(r.name)).join('\r\n') + '\r\n'], { type: 'text/csv;charset=utf-8' }));
   h.$app.querySelectorAll('[data-del]').forEach((b) => (b.onclick = async () => {
@@ -100,11 +102,12 @@ export async function viewDepartments(h) {
 
 // ---------- asset form ----------
 async function loadOrCreate(h, id) {
+  const pid = h.state.project.id;
   if (id) { const a = await db.get('assets', id); if (a) return a; }
-  const drafts = (await db.getAll('assets')).filter((a) => a.status === 'draft').sort((x, y) => (y.updated_at || '').localeCompare(x.updated_at || ''));
+  const drafts = (await db.getByProject('assets', pid)).filter((a) => a.status === 'draft').sort((x, y) => (y.updated_at || '').localeCompare(x.updated_at || ''));
   if (drafts.length && !id) return drafts[0];
-  const [inspector, context] = await Promise.all([db.getSetting('inspector', ''), db.getSetting('last_context', null)]);
-  const a = newDraft({ inspector, deviceId: h.state.deviceId, context });
+  const inspector = await db.getSetting('inspector', '');
+  const a = newDraft({ projectId: pid, inspector, deviceId: h.state.deviceId, context: h.state.project.last_context });
   await db.put('assets', a); // durable immediately (Android may kill the page while the camera is open)
   return a;
 }
@@ -115,7 +118,7 @@ export async function viewAssetForm(h, id) {
   const wasSaved = a.status === 'saved';
   const openCounts = await mediaCounts(a.id);
   const quality = await db.getSetting('photo_quality', 'alta');
-  const buildings = await db.getAll('buildings');
+  const buildings = await db.getByProject('buildings', a.project_id);
   let chain = Promise.resolve();
   let gone = false;     // set before deleting: no late write may recreate the asset
   let changed = false;  // user edits in this session
@@ -161,19 +164,19 @@ export async function viewAssetForm(h, id) {
 
   $('#c-b').onclick = async () => {
     if (!buildings.length) { msg('No hay edificios cargados. Impórtalos en Edificios.'); return; }
-    const items = buildings.sort((x, y) => x.code.localeCompare(y.code, 'es', { numeric: true })).map((x) => ({ value: x.code, label: x.code, sub: x.name }));
-    const r = await pick(h, { title: 'Edificio', items, current: a.building_code });
-    if (r?.value) { const b = buildings.find((x) => x.code === r.value); a.building_code = b.code; a.building_name = b.name; paintCtx(); msg(''); await persist(); }
+    const items = buildings.sort((x, y) => x.code.localeCompare(y.code, 'es', { numeric: true })).map((x) => ({ value: x.id, label: x.code, sub: x.name }));
+    const r = await pick(h, { title: 'Edificio', items, current: a.building_id || buildings.find((x) => x.code_key === db.normKey(a.building_code))?.id });
+    if (r?.value) { const b = buildings.find((x) => x.id === r.value); a.building_id = b.id; a.building_code = b.code; a.building_name = b.name; paintCtx(); msg(''); await persist(); }
   };
   $('#c-f').onclick = async () => {
     const r = await pick(h, { title: 'Piso', items: FLOORS.map((f) => ({ value: f, label: floorLabel(f) })), current: a.floor });
     if (r?.value) { a.floor = r.value; paintCtx(); msg(''); await persist(); }
   };
   $('#c-d').onclick = async () => {
-    const deps = await listDepartments();
+    const deps = await listDepartments(a.project_id);
     const r = await pick(h, { title: 'Departamento', items: deps.map((x) => ({ value: x.name, label: x.name })), newLabel: 'Nuevo departamento', current: a.department });
     let name = null;
-    if (r?.created) name = await addDepartment(r.created); else if (r?.value) name = r.value;
+    if (r?.created) name = await addDepartment(a.project_id, r.created); else if (r?.value) name = r.value;
     if (name) { a.department = name; paintCtx(); await persist(); }
   };
 
@@ -232,11 +235,13 @@ export async function viewAssetForm(h, id) {
 }
 
 // ---------- home list ----------
-const filters = { b: '', f: '', d: '', q: '', limit: 50 };
+const filters = { pid: null, b: '', f: '', d: '', q: '', limit: 50 };
 
 export async function viewHome(h) {
   leave();
-  const [nB, inspector, info, all] = await Promise.all([db.count('buildings'), db.getSetting('inspector', ''), h.storageInfo(), db.getAll('assets')]);
+  const pid = h.state.project.id;
+  if (filters.pid !== pid) Object.assign(filters, { pid, b: '', f: '', d: '', q: '', limit: 50 }); // filters belong to one project
+  const [nB, inspector, info, all] = await Promise.all([db.countByProject('buildings', pid), db.getSetting('inspector', ''), h.storageInfo(), db.getByProject('assets', pid)]);
 
   // Drafts: drop empty ones, offer to continue the rest.
   let draft = null;
@@ -257,13 +262,14 @@ export async function viewHome(h) {
   const todo = [];
   if (!inspector) todo.push('<li>Escribe tu nombre de inspector en <a href="#/ajustes">Ajustes</a>.</li>');
   if (!nB) todo.push('<li>Importa la lista de edificios en <a href="#/edificios">Edificios</a>.</li>');
+  if (!h.state.project.valuer_code) todo.push('<li>Define tu código de valuador en <a href="#/proyectos">Proyectos → Editar</a>.</li>');
   const buildingsSeen = [...new Set(saved.map((x) => x.building_code))].sort((x, y) => x.localeCompare(y, 'es', { numeric: true }));
   const floorsSeen = FLOORS.filter((f) => saved.some((x) => x.floor === f));
   const deptsSeen = [...new Set(saved.map((x) => x.department).filter(Boolean))].sort((x, y) => x.localeCompare(y, 'es'));
   const opt = (arr, cur, lab = (v) => v) => arr.map((v) => `<option value="${h.esc(v)}"${v === cur ? ' selected' : ''}>${h.esc(lab(v))}</option>`).join('');
 
   h.$app.innerHTML = `
-    <h1>Inicio</h1>
+    <h1>Inicio <span class="muted h1-sub">${h.esc(h.state.project.name)}</span></h1>
     ${inspector ? `<p class="hello">Hola, ${h.esc(inspector)} 👋</p>` : ''}
     ${todo.length ? `<div class="card"><strong>Configuración pendiente</strong><ul>${todo.join('')}</ul></div>` : ''}
     ${draft ? `<div class="card draft"><strong>Tienes un borrador sin guardar</strong><p class="muted">${h.esc([draft.building_code, draft.floor && floorLabel(draft.floor), draft.department].filter(Boolean).join(' · ') || 'Sin contexto')}</p>

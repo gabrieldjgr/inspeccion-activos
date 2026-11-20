@@ -10,6 +10,7 @@ import * as db from './db.js';
 import { APP_VERSION } from './version.js';
 import { csvEscape, buildingsToCsv } from './csv.js';
 import { getSavedAssets, getMedia, isPending, deleteAsset, folderName, blobId, nowIso } from './data.js';
+import { projectSlug, createProject } from './projects.js';
 
 const PART_OVERHEAD = 4096; // estimated bytes of JSON/CSV/txt per asset for partition planning
 const CSV_COLUMNS = ['id', 'seq', 'inspector', 'created_at', 'building_code', 'building_name', 'floor', 'department', 'notes', 'n_photos', 'n_audios', 'folder', 'gps_lat', 'gps_lon', 'gps_accuracy_m'];
@@ -37,12 +38,14 @@ export function buildAssetDoc(asset, photos, audios, names, exportedAt, deviceId
   return {
     schema_version: 1,
     id: asset.id,
+    project_id: asset.project_id ?? null,
     seq: asset.seq ?? null,
     inspector: asset.inspector ?? '',
     device_id: asset.device_id || deviceId || null,
     app_version: asset.app_version || APP_VERSION,
     created_at: asset.created_at,
     updated_at: asset.updated_at,
+    building_id: asset.building_id ?? null,
     building_code: asset.building_code ?? '',
     building_name: asset.building_name ?? '',
     floor: asset.floor ?? '',
@@ -104,7 +107,7 @@ export function filterAssets(assets, scope) {
   });
 }
 
-export const partFileName = (device8, stamp, n) => `inspeccion_${device8}_${stamp}_parte${n}.zip`;
+export const partFileName = (project, device8, stamp, n) => `inspeccion_${project}_${device8}_${stamp}_parte${n}.zip`;
 
 // Streaming zip writer around fflate. Chunks are accumulated; finish() returns them.
 export function createZipWriter() {
@@ -165,7 +168,8 @@ async function sizesOf(asset) {
 // opts: { scope, maxPartBytes, onProgress(done,total,label), onPart({n, total, name, blob, nAssets}) }
 export async function exportZip(h, opts) {
   const { scope, maxPartBytes, onProgress, onPart } = opts;
-  const all = await getSavedAssets();
+  const project = h.state.project;
+  const all = await getSavedAssets(project.id);
   const assets = filterAssets(all, scope).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)) || (a.seq ?? 0) - (b.seq ?? 0));
   if (!assets.length) return { parts: 0, assets: 0 };
 
@@ -178,7 +182,7 @@ export async function exportZip(h, opts) {
   const groups = partitionBySize(items, maxPartBytes);
   const totalParts = groups.length;
 
-  const [inspector, buildings] = await Promise.all([db.getSetting('inspector', ''), db.getAll('buildings')]);
+  const [inspector, buildings] = await Promise.all([db.getSetting('inspector', ''), db.getByProject('buildings', project.id)]);
   const buildingsCsv = buildingsToCsv(buildings.map((b) => ({ code: b.code, name: b.name })).sort((a, b) => a.code.localeCompare(b.code, 'es', { numeric: true })));
   const device8 = String(h.state.deviceId || 'sin-id').slice(0, 8);
   const startedAt = new Date();
@@ -193,6 +197,7 @@ export async function exportZip(h, opts) {
     const marks = [];
     w.addText('manifest.json', JSON.stringify({
       schema_version: 1, app_version: APP_VERSION, device_id: h.state.deviceId, inspector, exported_at: exportedAt,
+      project: { id: project.id, name: project.name, client: project.client, site: project.site, units: project.units }, valuer_code: project.valuer_code || null,
       part: p + 1, total_parts: totalParts, n_assets: group.length, filter: scope
     }, null, 2));
     w.addText('edificios.csv', buildingsCsv);
@@ -218,40 +223,45 @@ export async function exportZip(h, opts) {
     chunks.length = 0;
     // Only after the part was generated successfully: mark as exported (updated_at untouched).
     await markExported(marks, exportedAt);
-    onPart?.({ n: p + 1, total: totalParts, name: partFileName(device8, stamp, p + 1), blob, nAssets: group.length });
+    onPart?.({ n: p + 1, total: totalParts, name: partFileName(projectSlug(project), device8, stamp, p + 1), blob, nAssets: group.length });
     await new Promise((r) => setTimeout(r)); // let the UI breathe between parts
   }
   return { parts: totalParts, assets: total };
 }
 
 // ---------------------------------------------------------------- full backup
+// schema_version 1: DB v1 (app <= 0.2; also produced by the pre-migration backup, so v0.2 can restore it).
+// schema_version 2: DB v2 (projects). Both carry every asset of every project with photos, thumbs and audio.
 
-const settingsKeys = ['inspector', 'photo_quality', 'gps_enabled', 'seq_counter', 'last_context'];
+const SETTINGS_V1 = ['inspector', 'photo_quality', 'gps_enabled', 'seq_counter', 'last_context'];
+const SETTINGS_V2 = ['inspector', 'photo_quality', 'gps_enabled', 'seq_counter', 'active_project'];
 
 // Strips the Blob and adds file names; keeps uid, order and all metadata.
 const metaOf = (rec, file) => { const { blob, ...rest } = rec; return { ...rest, file }; };
 
 export async function exportBackup(h, onProgress) {
   const nowD = new Date();
-  const device8 = String(h.state.deviceId || 'sin-id').slice(0, 8);
-  const [buildings, departments, assets] = await Promise.all([db.getAll('buildings'), db.getAll('departments'), db.getAll('assets')]);
+  const version = await db.currentVersion();
+  const deviceId = h.state.deviceId || (await db.getSetting('device_id', null));
+  const device8 = String(deviceId || 'sin-id').slice(0, 8);
+  const keys = version < 2 ? SETTINGS_V1 : SETTINGS_V2;
   const settings = {};
-  for (const k of settingsKeys) { const v = await db.getSetting(k, undefined); if (v !== undefined) settings[k] = v; }
+  for (const k of keys) { const v = await db.getSetting(k, undefined); if (v !== undefined) settings[k] = v; }
+  const [buildings, departments, assets] = await Promise.all([db.getAll('buildings'), db.getAll('departments'), db.getAll('assets')]);
+  const head = version < 2
+    ? { schema_version: 1, app_version: APP_VERSION, exported_at: nowIso(nowD), n_assets: assets.length, edificios: buildings, departamentos: departments, settings }
+    : { schema_version: 2, app_version: APP_VERSION, exported_at: nowIso(nowD), n_assets: assets.length, proyectos: await db.getAll('projects'), edificios: buildings, departamentos: departments, listas: await db.getAll('lists'), settings };
   const w = createZipWriter();
-  w.addText('backup.json', JSON.stringify({
-    schema_version: 1, app_version: APP_VERSION, exported_at: nowIso(nowD), n_assets: assets.length,
-    edificios: buildings, departamentos: departments, settings
-  }, null, 2));
+  w.addText('backup.json', JSON.stringify(head, null, 2));
   assets.sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
   for (let i = 0; i < assets.length; i++) {
     const a = assets[i];
     onProgress?.(i, assets.length, 'Respaldo');
     const dir = `activos/${a.id}/`;
     const [photos, thumbs, audios] = await Promise.all([getMedia(a.id, 'photo'), getMedia(a.id, 'thumb'), getMedia(a.id, 'audio')]);
-    const thumbByUid = new Map(thumbs.map((t) => [t.uid, t]));
     const pMeta = []; const tMeta = []; const aMeta = [];
     const files = [];
-    for (const p of photos) { const f = `photo_${p.uid}.${extOf(p, 'jpg')}`; pMeta.push(metaOf(p, f)); files.push([dir + f, p]); thumbByUid.delete(p.uid); }
+    for (const p of photos) { const f = `photo_${p.uid}.${extOf(p, 'jpg')}`; pMeta.push(metaOf(p, f)); files.push([dir + f, p]); }
     for (const t of thumbs) { const f = `thumb_${t.uid}.jpg`; tMeta.push(metaOf(t, f)); files.push([dir + f, t]); }
     for (const x of audios) { const f = `audio_${x.uid}.${extOf(x, 'webm')}`; aMeta.push(metaOf(x, f)); files.push([dir + f, x]); }
     w.addText(dir + 'activo.json', JSON.stringify({ asset: a, photos: pMeta, thumbs: tMeta, audios: aMeta }, null, 2));
@@ -264,9 +274,62 @@ export async function exportBackup(h, onProgress) {
   return { blob, name: `respaldo_${device8}_${fileStamp(nowD)}.zip`, nAssets: assets.length };
 }
 
-// Restores a backup ZIP (whole file read in memory). Returns { assets, skipped, buildings, departments, settings, errors[] }.
+// Merge the master data of a backup into the DB. Returns { buildingIdFor(asset), projectIdFor(asset) }.
+async function restoreMasterData(backup, h, res) {
+  const now = nowIso();
+  if (backup.schema_version === 1) {
+    // v1 backup: everything goes into the active project (or a new one if there is none).
+    let project = h.state.project;
+    if (!project) { project = await createProject({ name: 'Restaurado ' + now.slice(0, 10), units: 'imperial' }); await db.setSetting('active_project', project.id); res.projects++; }
+    const pid = project.id;
+    const have = new Map((await db.getByProject('buildings', pid)).map((b) => [b.code_key, b.id]));
+    const newB = [];
+    for (const b of backup.edificios || []) {
+      const key = db.normKey(b?.code);
+      if (!key || have.has(key)) continue;
+      const id = crypto.randomUUID();
+      have.set(key, id);
+      newB.push({ id, project_id: pid, code: db.cleanText(b.code), code_key: key, name: db.cleanText(b.name), source: 'import', created_at: now, updated_at: now });
+    }
+    if (newB.length) await db.putMany('buildings', newB);
+    res.buildings = newB.length;
+    const haveD = new Set((await db.getByProject('departments', pid)).map((d) => d.key));
+    const newD = (backup.departamentos || []).filter((d) => d && d.key && !haveD.has(d.key)).map((d) => ({ id: db.departmentId(pid, d.key), project_id: pid, key: d.key, name: d.name }));
+    if (newD.length) await db.putMany('departments', newD);
+    res.departments = newD.length;
+    return { projectIdFor: () => pid, buildingIdFor: (a) => have.get(db.normKey(a.building_code)) || null };
+  }
+  // v2 backup: add what is missing, never overwrite local master data.
+  const haveP = new Set((await db.getAll('projects')).map((p) => p.id));
+  const newP = (backup.proyectos || []).filter((p) => p && p.id && !haveP.has(p.id));
+  if (newP.length) await db.putMany('projects', newP);
+  res.projects = newP.length;
+  const localB = await db.getAll('buildings');
+  const byKey = new Map(localB.map((b) => [`${b.project_id}|${b.code_key}`, b.id]));
+  const ids = new Set(localB.map((b) => b.id));
+  const remap = new Map(); // backup building id -> local building id (same code already present locally)
+  const newB = [];
+  for (const b of backup.edificios || []) {
+    if (!b || !b.id || !b.project_id || ids.has(b.id)) continue;
+    const k = `${b.project_id}|${b.code_key}`;
+    if (byKey.has(k)) { remap.set(b.id, byKey.get(k)); continue; }
+    byKey.set(k, b.id); ids.add(b.id); newB.push(b);
+  }
+  if (newB.length) await db.putMany('buildings', newB);
+  res.buildings = newB.length;
+  const haveD = new Set((await db.getAll('departments')).map((d) => d.id));
+  const newD = (backup.departamentos || []).filter((d) => d && d.id && d.project_id && !haveD.has(d.id));
+  if (newD.length) await db.putMany('departments', newD);
+  res.departments = newD.length;
+  const haveL = new Set((await db.getAll('lists')).map((l) => l.id));
+  const newL = (backup.listas || []).filter((l) => l && l.id && !haveL.has(l.id));
+  if (newL.length) await db.putMany('lists', newL);
+  return { projectIdFor: (a) => a.project_id, buildingIdFor: (a) => (a.building_id && remap.has(a.building_id) ? remap.get(a.building_id) : a.building_id ?? null) };
+}
+
+// Restores a backup ZIP (whole file read in memory). Returns { assets, skipped, projects, buildings, departments, settings, errors[] }.
 export async function importBackup(file, h, onProgress) {
-  const res = { assets: 0, skipped: 0, buildings: 0, departments: 0, settings: 0, errors: [] };
+  const res = { assets: 0, skipped: 0, projects: 0, buildings: 0, departments: 0, settings: 0, errors: [] };
   let files;
   try { files = unzipSync(new Uint8Array(await file.arrayBuffer())); } catch (e) {
     if (isMemoryError(e)) throw new Error('No hay memoria suficiente para abrir este respaldo. Genera respaldos más pequeños o usa un dispositivo con más memoria.');
@@ -275,18 +338,9 @@ export async function importBackup(file, h, onProgress) {
   if (!files['backup.json']) throw new Error('El ZIP no contiene backup.json: no es un respaldo de esta app.');
   let backup;
   try { backup = JSON.parse(strFromU8(files['backup.json'])); } catch (_) { throw new Error('backup.json está dañado.'); }
-  if (!backup || backup.schema_version !== 1) throw new Error('Versión de respaldo no compatible (schema_version ' + backup?.schema_version + ').');
+  if (!backup || (backup.schema_version !== 1 && backup.schema_version !== 2)) throw new Error('Versión de respaldo no compatible (schema_version ' + backup?.schema_version + '). Actualiza la app.');
 
-  // Buildings (merge: add the missing ones, keep existing names).
-  const haveB = new Set((await db.getAll('buildings')).map((b) => db.normKey(b.code)));
-  const newB = (backup.edificios || []).filter((b) => b && b.code && !haveB.has(db.normKey(b.code)));
-  if (newB.length) await db.putMany('buildings', newB.map((b) => ({ code: b.code, name: b.name })));
-  res.buildings = newB.length;
-  // Departments (merge by key).
-  const haveD = new Set((await db.getAll('departments')).map((d) => d.key));
-  const newD = (backup.departamentos || []).filter((d) => d && d.key && !haveD.has(d.key));
-  if (newD.length) await db.putMany('departments', newD);
-  res.departments = newD.length;
+  const map = await restoreMasterData(backup, h, res);
 
   // Assets (merge by id; most recent updated_at wins).
   const dirs = Object.keys(files).filter((k) => /^activos\/[^/]+\/activo\.json$/.test(k));
@@ -297,8 +351,9 @@ export async function importBackup(file, h, onProgress) {
     const dir = key.slice(0, key.lastIndexOf('/') + 1);
     try {
       const doc = JSON.parse(strFromU8(files[key]));
-      const a = doc.asset;
-      if (!a || !a.id || (a.status !== 'saved' && a.status !== 'draft')) throw new Error('registro inválido');
+      const src = doc.asset;
+      if (!src || !src.id || (src.status !== 'saved' && src.status !== 'draft')) throw new Error('registro inválido');
+      const a = { ...src, project_id: map.projectIdFor(src), building_id: map.buildingIdFor(src) };
       if (a.seq > maxSeq) maxSeq = a.seq;
       const cur = await db.get('assets', a.id);
       if (cur && String(cur.updated_at) >= String(a.updated_at)) { res.skipped++; continue; }
@@ -320,9 +375,8 @@ export async function importBackup(file, h, onProgress) {
   }
   // Settings: fill in the missing ones; seq_counter = max of everything. NEVER touch device_id.
   const sett = backup.settings || {};
-  for (const k of settingsKeys) {
-    if (k === 'seq_counter') continue;
-    if (sett[k] !== undefined && (await db.getSetting(k, undefined)) === undefined) { await db.setSetting(k, sett[k]); res.settings++; }
+  for (const k of ['inspector', 'photo_quality', 'gps_enabled', 'active_project']) {
+    if (sett[k] !== undefined && sett[k] !== null && (await db.getSetting(k, undefined)) == null) { await db.setSetting(k, sett[k]); res.settings++; }
   }
   const seq = Math.max(Number(await db.getSetting('seq_counter', 0)) || 0, Number(sett.seq_counter) || 0, maxSeq);
   if (seq > 0 && seq !== (await db.getSetting('seq_counter', 0))) { await db.setSetting('seq_counter', seq); res.settings++; }
@@ -336,8 +390,9 @@ export async function viewExport($app, h) {
   const canShare = (blob, name) => { try { return !!(navigator.canShare && navigator.canShare({ files: [new File([blob], name, { type: 'application/zip' })] })); } catch (_) { return false; } };
   let busy = false;
 
+  const pid = h.state.project.id;
   const stats = async () => {
-    const saved = await getSavedAssets();
+    const saved = await getSavedAssets(pid);
     const pending = saved.filter(isPending).length;
     return { saved, total: saved.length, pending, exported: saved.filter((a) => a.exported_at && !isPending(a)).length };
   };
@@ -345,10 +400,10 @@ export async function viewExport($app, h) {
   const buildings = new Map();
   for (const a of s0.saved) if (a.building_code && !buildings.has(a.building_code)) buildings.set(a.building_code, a.building_name);
   const today = nowIso().slice(0, 10);
-  const nDrafts = (await db.getAll('assets')).length - s0.total;
+  const nDrafts = (await db.countByProject('assets', pid)) - s0.total;
 
   $app.innerHTML = `
-    <h1>Exportar</h1>
+    <h1>Exportar <span class="muted h1-sub">${esc(h.state.project.name)}</span></h1>
     <div class="card">
       <dl class="kv">
         <dt>Activos guardados</dt><dd id="x-total">${s0.total}</dd>
@@ -387,7 +442,7 @@ export async function viewExport($app, h) {
     </div>
     <div class="card">
       <h2 class="x-h">Respaldo completo</h2>
-      <p class="muted">Incluye todos los activos (también borradores y exportados), edificios, departamentos y ajustes. Sirve para pasar los datos a otro teléfono o recuperarlos tras reinstalar. Se arma en un solo archivo: con muchas fotos puede requerir bastante memoria.</p>
+      <p class="muted">Incluye <strong>todos los proyectos</strong> de este teléfono: activos (también borradores y exportados), edificios, departamentos y ajustes. Sirve para pasar los datos a otro teléfono o recuperarlos tras reinstalar. Se arma en un solo archivo: con muchas fotos puede requerir bastante memoria.</p>
       <div class="row">
         <button class="btn" id="x-backup">Crear respaldo completo</button>
         <button class="btn" id="x-restore">Restaurar respaldo…</button>
@@ -398,7 +453,7 @@ export async function viewExport($app, h) {
       <ul id="x-bparts" class="x-parts"></ul>
     </div>
     <div class="card">
-      <h2 class="x-h">Borrar activos ya exportados</h2>
+      <h2 class="x-h">Borrar activos ya exportados de este proyecto</h2>
       <p class="muted">Libera espacio. Solo borra activos exportados que no se hayan editado después. Esta acción no se puede deshacer.</p>
       <div class="row"><button class="btn danger" id="x-del">Borrar activos ya exportados</button></div>
       <p id="x-dmsg" role="status"></p>
@@ -424,7 +479,7 @@ export async function viewExport($app, h) {
   };
   async function updateCount() {
     try {
-      const n = filterAssets(await getSavedAssets(), currentScope()).length;
+      const n = filterAssets(await getSavedAssets(pid), currentScope()).length;
       $('x-count').textContent = `Se exportarán ${n} activo${n === 1 ? '' : 's'}.`;
     } catch (_) { /* ignore */ }
   }
@@ -502,12 +557,13 @@ export async function viewExport($app, h) {
   $('x-file').onchange = async () => {
     const f = $('x-file').files[0];
     if (!f || busy) return;
-    if (!(await confirmDlg('Restaurar respaldo', `<p>Se fusionará <strong>${esc(f.name)}</strong> (${fmtBytes(f.size)}) con los datos de este dispositivo. Si un activo ya existe se conserva la versión más reciente. No se cambia el ID de este dispositivo.</p>`, 'Restaurar'))) return;
+    if (!(await confirmDlg('Restaurar respaldo', `<p>Se fusionará <strong>${esc(f.name)}</strong> (${fmtBytes(f.size)}) con los datos de este dispositivo. Un respaldo de la versión anterior (sin proyectos) se carga en el proyecto activo. Si un activo ya existe se conserva la versión más reciente. No se cambia el ID de este dispositivo.</p>`, 'Restaurar'))) return;
     setBusy(true); say('x-bmsg', '', '');
     try {
       const r = await importBackup(f, h, bprog);
       $('x-bprog').hidden = true;
-      const lines = [`Activos restaurados: ${r.assets}`, `Activos omitidos (ya tenías una versión igual o más reciente): ${r.skipped}`, `Edificios agregados: ${r.buildings}`, `Departamentos agregados: ${r.departments}`, `Ajustes restaurados: ${r.settings}`];
+      await h.refreshProject();
+      const lines = [`Activos restaurados: ${r.assets}`, `Activos omitidos (ya tenías una versión igual o más reciente): ${r.skipped}`, `Proyectos agregados: ${r.projects}`, `Edificios agregados: ${r.buildings}`, `Departamentos agregados: ${r.departments}`, `Ajustes restaurados: ${r.settings}`];
       say('x-bmsg', r.errors.length ? 'bad' : 'ok', lines.join(' · '));
       if (r.errors.length) await ask('Restauración con avisos', `<p>${lines.map(esc).join('<br>')}</p><p class="bad">Problemas:</p><ul>${r.errors.slice(0, 30).map((x) => `<li>${esc(x)}</li>`).join('')}</ul>`, [{ label: 'Cerrar', value: null, cls: 'primary' }]);
     } catch (e) { console.error(e); say('x-bmsg', 'bad', e && e.message ? e.message : String(e)); } finally {
@@ -521,7 +577,7 @@ export async function viewExport($app, h) {
     if (busy) return;
     setBusy(true); say('x-dmsg', '', '');
     try {
-      const targets = (await getSavedAssets()).filter((a) => a.exported_at && !isPending(a));
+      const targets = (await getSavedAssets(pid)).filter((a) => a.exported_at && !isPending(a));
       if (!targets.length) { say('x-dmsg', 'muted', 'No hay activos exportados para borrar.'); return; }
       const ok1 = await confirmDlg('Borrar activos exportados', `<p>Se borrarán <strong>${targets.length}</strong> activo${targets.length === 1 ? '' : 's'} ya exportado${targets.length === 1 ? '' : 's'} de este dispositivo, con sus fotos y audios.</p><p class="muted">Los activos editados después de exportar o sin exportar no se tocan.</p>`, 'Continuar', 'danger');
       if (!ok1) return;
