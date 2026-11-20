@@ -232,4 +232,19 @@ details.bsec > :not(summary) { margin-left: 16px; margin-right: 16px; }
 .bdone { flex: 1 1 100%; margin: 0; font-weight: 800; text-align: center; }
 .bhint { flex: 1 1 100%; margin: 0; text-align: center; }
 #b-bar #b-mark { flex: 2 1 100%; min-height: 64px; font-size: 1.15rem; }
+.bmore { margin-top: 10px; }
+.bmore > summary { font-weight: 700; cursor: pointer; min-height: 32px; }
+.imp-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 10px 0; }
+.imp-stats > div { background: var(--bg); border-radius: 12px; padding: 8px 4px; text-align: center; }
+.imp-stats b { display: block; font-size: 1.4rem; }
+.imp-stats span { font-size: .72rem; font-weight: 700; color: var(--muted); }
+.imp-stats .bad b { color: var(--danger); }
+.imp-mode { border: 1px solid var(--line); border-radius: 12px; padding: 8px 12px; margin: 10px 0; }
+.imp-mode legend { font-weight: 700; font-size: .9rem; }
+.radio { display: flex; gap: 10px; align-items: flex-start; font-weight: 500; margin: 8px 0; font-size: .92rem; }
+.radio input { width: 22px; height: 22px; flex: 0 0 auto; }
+.imp-h { font-size: .95rem; margin: 14px 0 4px; }
+.imp-list { margin: 0; padding-left: 18px; font-size: .88rem; }
+.imp-list li { margin: 3px 0; }
+.warn-box { background: var(--warn-bg); color: var(--warn-text); border-radius: 10px; padding: 8px 10px; font-size: .9rem; }
 @media (prefers-reduced-motion: reduce) { .btn { transition: none; } }

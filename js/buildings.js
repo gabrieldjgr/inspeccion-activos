@@ -2,7 +2,8 @@
 // The form writes only the building record; photos/audio live in 'blobs' with asset_id = building.id.
 import * as db from './db.js';
 import { nowIso, mediaCounts, mediaIndex, countsOf } from './data.js';
-import { parseBuildingsCsv, buildingsToCsv } from './csv.js';
+import { buildTemplate, parseBuildingsFile, planImport } from './bldg-import.js';
+import { projectSlug } from './projects.js';
 import { mountPhotos } from './photos.js';
 import { mountAudio } from './audio.js';
 import { pick, quickBuilding, leave as leaveAssets } from './assets.js';
@@ -76,10 +77,16 @@ export async function viewBuildings(h) {
       </div></div>` : ''}
     <div class="row">
       <button class="btn primary" id="b-add">+ Nuevo edificio</button>
-      <button class="btn" id="b-import">Importar CSV</button>
-      <button class="btn" id="b-export"${rows.length ? '' : ' disabled'}>Exportar CSV</button>
+      <button class="btn" id="b-import">⬆ Importar Excel</button>
     </div>
-    <input id="b-file" class="sr" type="file" accept=".csv,text/csv,text/plain" tabindex="-1">
+    <details class="card bmore"><summary>Plantilla y exportación a Excel</summary>
+      <p class="muted small">Plantilla con las mismas columnas y listas del Excel de levantamiento. Llénala (o copia y pega desde el archivo fuente) e impórtala aquí. También se puede importar directamente el archivo fuente o un CSV.</p>
+      <div class="row">
+        <button class="btn" id="b-tpl">⬇ Plantilla vacía</button>
+        <button class="btn" id="b-xls"${rows.length ? '' : ' disabled'}>⬇ Edificios a Excel</button>
+      </div>
+    </details>
+    <input id="b-file" class="sr" type="file" accept=".xlsx,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" tabindex="-1">
     ${rows.length ? `<input id="b-q" type="search" placeholder="Buscar código o nombre…" aria-label="Buscar edificio" value="${h.esc(view.q)}" style="margin-top:12px">` : ''}
     <div id="b-list"></div>
     ${!rows.length ? '<div class="card empty-state"><span class="big-emoji">🏢</span><strong>Aún no hay edificios</strong><p class="muted">Créalos aquí o al registrar un activo, o importa la lista.</p></div>' : ''}`;
@@ -102,36 +109,88 @@ export async function viewBuildings(h) {
     const b = await quickBuilding(h, h.state.project, rows, '');
     if (b) h.navigate('#/edificio?id=' + encodeURIComponent(b.id));
   };
-  $('#b-export').onclick = () => h.download('edificios.csv', new Blob([buildingsToCsv(rows)], { type: 'text/csv;charset=utf-8' }));
+  const XLSX_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  const custom = () => db.getByProject('lists', pid);
+  $('#b-tpl').onclick = async () => {
+    try {
+      const bytes = buildTemplate({ units: h.state.project.units, custom: await custom(), projectName: h.state.project.name });
+      h.download(`plantilla_edificios_${projectSlug(h.state.project)}.xlsx`, new Blob([bytes], { type: XLSX_TYPE }));
+    } catch (e) { h.reportError(e); }
+  };
+  $('#b-xls').onclick = async () => {
+    try {
+      const bytes = buildTemplate({ units: h.state.project.units, custom: await custom(), projectName: h.state.project.name, buildings: rows });
+      h.download(`edificios_${projectSlug(h.state.project)}.xlsx`, new Blob([bytes], { type: XLSX_TYPE }));
+    } catch (e) { h.reportError(e); }
+  };
   const $file = $('#b-file');
   $('#b-import').onclick = () => { $file.value = ''; $file.click(); };
-  $file.onchange = () => importCsv(h, $file.files[0], rows);
+  $file.onchange = () => importFile(h, $file.files[0]);
   draw();
 }
 
-async function importCsv(h, file, existing) {
+// ---------- import with preview ----------
+const MODES = {
+  fill: 'Agregar nuevos y completar solo los campos vacíos (recomendado: no pisa lo capturado en campo)',
+  overwrite: 'Agregar nuevos y sobrescribir con los valores del archivo',
+  new: 'Solo agregar edificios nuevos'
+};
+const lineList = (lines) => (lines.length > 8 ? lines.slice(0, 8).join(', ') + ` y ${lines.length - 8} más` : lines.join(', '));
+
+async function importFile(h, file) {
   if (!file) return;
+  const pid = h.state.project.id;
+  const units = h.state.project.units || 'imperial';
+  let parsed;
   try {
-    const res = parseBuildingsCsv(await file.arrayBuffer());
-    if (res.errors.length && !res.rows.length) {
-      await h.ask('No se pudo importar', `<ul>${res.errors.map((e) => `<li>${h.esc(e)}</li>`).join('')}</ul>`, [{ label: 'Cerrar', value: null, cls: 'primary' }]);
-      return;
-    }
-    let body = `<p>Se leyeron <strong>${res.rows.length}</strong> edificios${res.encoding === 'windows-1252' ? ' (archivo en codificación ANSI/Windows-1252)' : ''}.</p>`;
-    if (res.duplicates.length) body += `<p class="bad">Códigos BLDG # duplicados (se conservó la primera aparición): ${res.duplicates.map((d) => `${h.esc(d.code)} (fila ${d.line})`).join(', ')}.</p>`;
-    if (res.errors.length) body += `<p class="bad">Filas omitidas:</p><ul>${res.errors.map((e) => `<li>${h.esc(e)}</li>`).join('')}</ul>`;
-    if (existing.length) body += `<p>Ya hay ${existing.length} edificios. Se agregan los nuevos y se actualiza el nombre de los códigos que coincidan; no se borra ninguno ni sus datos de inspección.</p>`;
-    if (!(await h.confirmDlg('Importar edificios', body, 'Importar'))) return;
-    const pid = h.state.project.id;
-    const now = nowIso();
-    const byKey = new Map(existing.map((e) => [e.code_key, e]));
-    await db.putMany('buildings', res.rows.map((r) => {
-      const e = byKey.get(db.normKey(r.code));
-      return e ? { ...e, name: r.name, updated_at: now } : { id: crypto.randomUUID(), project_id: pid, code: r.code, code_key: db.normKey(r.code), name: r.name, source: 'import', created_at: now, updated_at: now };
-    }));
-    h.showBanner('imp', 'info', 'Edificios importados ✓', [{ label: 'OK', onClick: () => h.hideBanner('imp') }]);
-    await viewBuildings(h);
-  } catch (e) { h.reportError(e); }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    parsed = parseBuildingsFile(bytes, file.name, { projectUnits: units, custom: await db.getByProject('lists', pid) });
+  } catch (e) { h.reportError(e); return; }
+  if (!parsed.rows.length) {
+    await h.ask('No se pudo importar', `<ul>${parsed.errors.map((e) => `<li>${e.line ? `Fila ${e.line}: ` : ''}${h.esc(e.msg)}</li>`).join('')}</ul>`, [{ label: 'Cerrar', value: null, cls: 'primary' }]);
+    return;
+  }
+  const existing = await db.getByProject('buildings', pid);
+  let mode = 'fill';
+  const d = h.$dlg;
+  const draw = () => {
+    const plan = planImport(parsed, existing, mode);
+    const unitNote = parsed.units !== units
+      ? `<p class="warn-box">El archivo está en <strong>${parsed.units === 'metric' ? 'metros' : 'pies'}</strong> y el proyecto en <strong>${units === 'metric' ? 'metros' : 'pies'}</strong>. Las medidas se guardan con la unidad del archivo y la app las convierte.</p>` : '';
+    d.innerHTML = `<h2 style="margin-top:0">Importar edificios</h2>
+      <div class="scroll tall">
+        <p class="muted small">${h.esc(file.name)}${parsed.sheet ? ` · hoja “${h.esc(parsed.sheet)}”` : ''} · unidades: ${parsed.units === 'metric' ? 'métricas' : 'imperiales'}${parsed.unitsFromFile ? ' (según los encabezados)' : ' (del proyecto)'}</p>
+        ${unitNote}
+        <div class="imp-stats"><div><b>${plan.create.length}</b><span>nuevos</span></div><div><b>${plan.update.length}</b><span>se actualizan</span></div><div><b>${plan.unchanged.length}</b><span>sin cambios</span></div><div class="${parsed.errors.length ? 'bad' : ''}"><b>${parsed.errors.length}</b><span>filas con error</span></div></div>
+        ${existing.length ? `<fieldset class="imp-mode"><legend>Edificios que ya existen (mismo código)</legend>${Object.entries(MODES).map(([k, l]) => `<label class="radio"><input type="radio" name="imp-mode" value="${k}"${mode === k ? ' checked' : ''}> ${l}</label>`).join('')}</fieldset>` : ''}
+        ${mode === 'fill' && plan.conflicts.length ? `<p class="muted small">${plan.conflicts.length} campo(s) ya tenían otro valor en la app y se conservan.</p>` : ''}
+        ${parsed.errors.length ? `<h3 class="imp-h bad">Filas que no se importan</h3><ul class="imp-list">${parsed.errors.map((e) => `<li><strong>Fila ${e.line}</strong>: ${h.esc(e.msg)}</li>`).join('')}</ul>` : ''}
+        ${parsed.outOfList.length ? `<h3 class="imp-h">Valores fuera de lista</h3><ul class="imp-list">${parsed.outOfList.map((o) => `<li><strong>${h.esc(o.label)} (${o.col})</strong>: “${h.esc(o.value)}” — filas ${lineList(o.lines)}</li>`).join('')}</ul>
+          <label class="switch"><input type="checkbox" id="imp-addlists" checked> Agregarlos a las listas del proyecto</label>` : ''}
+        ${parsed.warnings.length ? `<h3 class="imp-h">Avisos (${parsed.warnings.length})</h3><ul class="imp-list">${parsed.warnings.slice(0, 60).map((e) => `<li>${e.line ? `<strong>Fila ${e.line}</strong>: ` : ''}${h.esc(e.msg)}</li>`).join('')}${parsed.warnings.length > 60 ? `<li>… y ${parsed.warnings.length - 60} más</li>` : ''}</ul>` : ''}
+        ${parsed.ignored.length ? `<p class="muted small">Columnas no reconocidas (se ignoran): ${parsed.ignored.map(h.esc).join(' · ')}</p>` : ''}
+      </div>
+      <div class="actions"><button class="btn primary" id="imp-go"${plan.create.length + plan.update.length ? '' : ' disabled'}>Importar ${plan.create.length + plan.update.length} edificio(s)</button><button class="btn" id="imp-cancel">Cancelar</button></div>`;
+    d.querySelectorAll('input[name=imp-mode]').forEach((r) => (r.onchange = () => { mode = r.value; draw(); }));
+    d.querySelector('#imp-cancel').onclick = () => d.close();
+    d.querySelector('#imp-go').onclick = async () => {
+      const addLists = !!d.querySelector('#imp-addlists')?.checked;
+      d.querySelector('#imp-go').disabled = true;
+      try {
+        const now = nowIso();
+        const creates = plan.create.map((r) => ({ id: crypto.randomUUID(), project_id: pid, code: r.code, code_key: db.normKey(r.code), name: r.name || r.code, fields: r.fields, source: 'import', created_at: now, updated_at: now }));
+        const updates = plan.update.map((u) => ({ ...u.cur, name: u.name || u.cur.name, fields: u.fields, updated_at: now }));
+        const lists = addLists ? parsed.outOfList.map((o) => ({ id: listId(pid, o.scope, o.value), project_id: pid, field: o.scope, value: o.value, created_at: now })) : [];
+        await db.tx(['buildings', 'lists'], 'readwrite', (st) => { for (const b of [...creates, ...updates]) st.buildings.put(b); for (const l of lists) st.lists.put(l); });
+        d.close();
+        h.showBanner('imp', 'info', `Importación lista: ${creates.length} nuevos, ${updates.length} actualizados${lists.length ? `, ${lists.length} valor(es) agregados a las listas` : ''} ✓`, [{ label: 'OK', onClick: () => h.hideBanner('imp') }]);
+        await viewBuildings(h);
+      } catch (e) { d.close(); h.reportError(e); }
+    };
+  };
+  d.onclose = null;
+  draw();
+  d.showModal();
 }
 
 // ---------- building form ----------

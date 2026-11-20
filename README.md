@@ -2,7 +2,7 @@
 
 App web instalable para registrar activos en campo, 100 % offline después de la primera carga. Sitio estático (HTML + CSS + JS, sin build) pensado para GitHub Pages. La especificación completa está en `BRIEF_App_Inspeccion_Activos.md`.
 
-**Estado: v0.3.2 — F0 (proyectos), F1 (captura rápida) y F2 (edificios estructurados) del plan v0.3.** Sobre la base v0.2 (registro, fotos, audio, exportación ZIP, respaldo) se agregan proyectos, código de valuador, paquete de proyecto y la migración segura de los datos existentes. Verificado en Chromium de escritorio con pruebas automatizadas (migración v1→v2 con datos reales de v0.2.2, fallo simulado a mitad de la migración, aislamiento entre proyectos, paquetes y restauración de respaldos v1/v2). **Sin probar aún en dispositivo real:** cámara, micrófono, compartir y modo avión (ver pruebas manuales abajo).
+**Estado: v0.3.3 — F0 (proyectos), F1 (captura rápida), F2 (edificios estructurados) y F3 (plantilla e importación) del plan v0.3.** Sobre la base v0.2 (registro, fotos, audio, exportación ZIP, respaldo) se agregan proyectos, código de valuador, paquete de proyecto y la migración segura de los datos existentes. Verificado en Chromium de escritorio con pruebas automatizadas (migración v1→v2 con datos reales de v0.2.2, fallo simulado a mitad de la migración, aislamiento entre proyectos, paquetes y restauración de respaldos v1/v2). **Sin probar aún en dispositivo real:** cámara, micrófono, compartir y modo avión (ver pruebas manuales abajo).
 
 ## Estructura
 
@@ -11,6 +11,7 @@ index.html  styles.css  manifest.webmanifest  sw.js  .nojekyll
 js/    app.js (rutas, ajustes, edificios) · assets.js (formulario, lista, departamentos) · data.js (contratos de datos)
        projects.js (proyectos, paquete de proyecto) · migrate.js (pantalla de migración v1→v2) · camera.js (cámara rápida, beta)
        buildings.js (lista con estados y formulario de edificio) · bldg-schema.js (columnas del Excel, listas, unidades)
+       bldg-import.js (plantilla e importación de edificios) · xlsx.js (lector/escritor .xlsx mínimo sobre fflate)
        photos.js · audio.js · export.js · db.js (IndexedDB) · csv.js · version.js
 css/   photos.css · audio.css · export.css      vendor/ fflate.esm.js (ZIP, vendorizado)
 icons/ iconos PNG (any, maskable, apple-touch)
@@ -51,6 +52,19 @@ Abre `http://localhost:8080` (localhost cuenta como contexto seguro, el service 
 3. `node tools/check-precache.mjs`, commit y push.
 4. En el teléfono, al abrir la app aparece el aviso **"Hay una nueva versión — Actualizar"**. También: Ajustes → *Buscar actualización*. La app nunca se actualiza sola a mitad de un registro.
 5. Para forzar: cerrar la app por completo y reabrir, o en Chrome → Configuración del sitio → Borrar datos (**¡borra los registros!**; exporta antes).
+
+## Precarga de edificios con Excel (v0.3 F3)
+
+En **Edificios → Plantilla y exportación a Excel**:
+- **⬇ Plantilla vacía** (`plantilla_edificios_{proyecto}.xlsx`): hoja *Edificios* con las 33 columnas del Excel de levantamiento (mismo orden; encabezados con las unidades del proyecto), listas desplegables (las del Excel, Aux_List para *HVAC Type* con `INDIRECT` y los valores agregados en el proyecto), validación de números y %, encabezado fijo; hoja *Instrucciones* y hoja oculta *Listas*.
+- **⬇ Edificios a Excel**: lo mismo con los edificios del proyecto (sirve para revisar o editar en la PC y volver a importar).
+
+**⬆ Importar Excel** acepta la plantilla llena, **el archivo fuente directamente** (mismo formato, p. ej. *Allison Brugge.xlsx*) o un CSV:
+- Las columnas se reconocen por su encabezado (sin importar orden, saltos de línea ni unidades); las desconocidas se listan y se ignoran. Las unidades se detectan en los encabezados (Square Feet / Square Meters).
+- Se leen los valores calculados de las fórmulas; si la fórmula es solo aritmética (`=12*95.5*10.7639`) también se guarda como operación. Una fórmula sin valor calculado (archivo nunca guardado en Excel) se avisa y la celda se omite.
+- **Vista previa** antes de importar: nuevos / se actualizan / sin cambios / filas con error; filas sin código o con código repetido; valores fuera de lista (con sus filas, opción de agregarlos a las listas del proyecto); celdas omitidas (números inválidos, YES/NO mal escritos, valores no permitidos en ISO Code / Fire Protection / HVAC Category).
+- Edificios con el mismo código: **completar solo campos vacíos** (predeterminado: no pisa lo capturado en campo), **sobrescribir** con el archivo o **solo agregar nuevos**. Lo importado queda *Pendiente* hasta que se capture algo en campo.
+- `.xls` (Excel 97-2003) y `.xlsb` no se leen: guardar como `.xlsx`.
 
 ## Formato del CSV de edificios
 
@@ -165,3 +179,12 @@ La app solo graba los audios. Para transcribirlos en tu PC (Whisper local, espa�
 5. Cerrar la app a mitad de la captura y reabrir: nada se pierde.
 6. Exportar (Todos): el ZIP trae `edificios/B1/edificio.json` y la foto; abrir `edificios.csv` en Excel y comparar columnas con la plantilla original.
 7. Usar el formulario con guantes y al sol (modo sol): ¿los botones de lista y Sí/No son cómodos?
+
+## Pruebas manuales — v0.3 F3 (plantilla e importación)
+
+1. Edificios → *Plantilla vacía*: abrirla en Excel (PC y móvil): listas desplegables, HVAC Type cambia según la categoría, encabezados con unidades.
+2. Copiar y pegar 5 filas del archivo fuente a la plantilla → guardar → *Importar Excel* → revisar vista previa → importar.
+3. Importar directamente *Allison Brugge.xlsx*: 13 edificios; aviso de "SPACE HEATERS, WITH FAN" fuera de lista (filas 2, 3, 12).
+4. Capturar algo en campo en un edificio y reimportar: con "completar campos vacíos" lo capturado no cambia.
+5. Probar un archivo con un código repetido y una fila sin código: los errores deben indicar la fila.
+6. *Edificios a Excel* → abrir en Excel → reimportar sin cambios: "0 nuevos, 0 se actualizan".
