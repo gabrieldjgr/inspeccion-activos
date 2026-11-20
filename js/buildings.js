@@ -68,7 +68,7 @@ export async function viewBuildings(h) {
   h.$app.innerHTML = `
     <h1>Edificios <span class="muted h1-sub">${h.esc(h.state.project.name)}</span></h1>
     ${rows.length ? `<div class="card bprog">
-      <div class="bprog-head"><strong>${totals.inspected} de ${rows.length} inspeccionados</strong><span>${pct} %</span></div>
+      <div class="bprog-head"><strong>${totals.inspected} de ${rows.length} inspeccionados</strong><span>${pct} % <button type="button" class="btn bpdf" id="b-pdf">📄 Reporte</button></span></div>
       <div class="bar"><i style="width:${pct}%"></i></div>
       <div class="bstats" role="group" aria-label="Filtrar por estado">
         <button type="button" class="bstat st-pending${view.status === 'pending' ? ' on' : ''}" data-st="pending"><b>${totals.pending}</b><span>Pendientes</span></button>
@@ -104,6 +104,10 @@ export async function viewBuildings(h) {
       : '<div class="card empty-state"><strong>Ningún edificio coincide</strong></div>';
   };
   h.$app.querySelectorAll('.bstat').forEach((b) => (b.onclick = () => { view.status = view.status === b.dataset.st ? 'all' : b.dataset.st; viewBuildings(h); }));
+  const pdf = $('#b-pdf'); if (pdf) pdf.onclick = async () => {
+    pdf.disabled = true;
+    try { const { shareReport } = await import('./report.js'); await shareReport(h); } catch (e) { h.reportError(e); } finally { pdf.disabled = false; }
+  };
   const q = $('#b-q'); if (q) q.addEventListener('input', () => { view.q = q.value; draw(); });
   $('#b-add').onclick = async () => {
     const b = await quickBuilding(h, h.state.project, rows, '');

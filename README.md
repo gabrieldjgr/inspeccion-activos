@@ -2,7 +2,7 @@
 
 App web instalable para registrar activos en campo, 100 % offline después de la primera carga. Sitio estático (HTML + CSS + JS, sin build) pensado para GitHub Pages. La especificación completa está en `BRIEF_App_Inspeccion_Activos.md`.
 
-**Estado: v0.3.4 — F0 (proyectos), F1 (captura rápida), F2 (edificios), F3 (plantilla e importación) y F4 (exportación para IA) del plan v0.3.** Sobre la base v0.2 (registro, fotos, audio, exportación ZIP, respaldo) se agregan proyectos, código de valuador, paquete de proyecto y la migración segura de los datos existentes. Verificado en Chromium de escritorio con pruebas automatizadas (migración v1→v2 con datos reales de v0.2.2, fallo simulado a mitad de la migración, aislamiento entre proyectos, paquetes y restauración de respaldos v1/v2). **Sin probar aún en dispositivo real:** cámara, micrófono, compartir y modo avión (ver pruebas manuales abajo).
+**Estado: v0.3.5 — F0 (proyectos), F1 (captura rápida), F2 (edificios), F3 (plantilla e importación), F4 (exportación para IA) y F5 (reporte PDF) del plan v0.3.** Sobre la base v0.2 (registro, fotos, audio, exportación ZIP, respaldo) se agregan proyectos, código de valuador, paquete de proyecto y la migración segura de los datos existentes. Verificado en Chromium de escritorio con pruebas automatizadas (migración v1→v2 con datos reales de v0.2.2, fallo simulado a mitad de la migración, aislamiento entre proyectos, paquetes y restauración de respaldos v1/v2). **Sin probar aún en dispositivo real:** cámara, micrófono, compartir y modo avión (ver pruebas manuales abajo).
 
 ## Estructura
 
@@ -13,6 +13,7 @@ js/    app.js (rutas, ajustes, edificios) · assets.js (formulario, lista, depar
        buildings.js (lista con estados y formulario de edificio) · bldg-schema.js (columnas del Excel, listas, unidades)
        bldg-import.js (plantilla e importación de edificios) · xlsx.js (lector/escritor .xlsx mínimo sobre fflate)
        ai-export.js (ZIP para IA: estructura, índice, README_IA) · ziputil.js (ZIP, SHA-256) · export.js (pantalla Exportar, respaldo)
+       report.js (reporte de avance) · pdf.js (generador de PDF mínimo, Helvetica WinAnsi)
        photos.js · audio.js · export.js · db.js (IndexedDB) · csv.js · version.js
 css/   photos.css · audio.css · export.css      vendor/ fflate.esm.js (ZIP, vendorizado)
 icons/ iconos PNG (any, maskable, apple-touch)
@@ -66,6 +67,16 @@ En **Edificios → Plantilla y exportación a Excel**:
 - **Vista previa** antes de importar: nuevos / se actualizan / sin cambios / filas con error; filas sin código o con código repetido; valores fuera de lista (con sus filas, opción de agregarlos a las listas del proyecto); celdas omitidas (números inválidos, YES/NO mal escritos, valores no permitidos en ISO Code / Fire Protection / HVAC Category).
 - Edificios con el mismo código: **completar solo campos vacíos** (predeterminado: no pisa lo capturado en campo), **sobrescribir** con el archivo o **solo agregar nuevos**. Lo importado queda *Pendiente* hasta que se capture algo en campo.
 - `.xls` (Excel 97-2003) y `.xlsb` no se leen: guardar como `.xlsx`.
+
+## Reporte de avance en PDF (v0.3 F5)
+
+Exportar → **📄 Compartir reporte** (o *Descargar PDF*), y en Edificios el botón **📄 Reporte** junto a la barra de avance. `avance_{proyecto}_{AAAAMMDD-HHmm}.pdf` (A4) con:
+- Resumen: edificios inspeccionados / total (con barra inspeccionado-en proceso-pendiente), activos (hoy, por exportar), fotos y notas de voz, registros por revisar.
+- Tabla de edificios: estado, fotos, voz, activos, campos llenos.
+- Activos por departamento, por edificio y piso, y por día.
+- Listas: activos sin foto, sin nota (ni texto ni voz), con fotos pero sin foto de placa, y edificios sin foto.
+
+Se comparte con la hoja de compartir del teléfono (WhatsApp, Teams, Outlook, Drive): a diferencia del ZIP, Android sí permite compartir PDF desde la app. Sin conexión funciona igual (el PDF se genera en el teléfono, sin librerías externas).
 
 ## Formato del CSV de edificios
 
@@ -219,3 +230,10 @@ La app solo graba los audios. Para transcribirlos en tu PC (Whisper local, espa�
 4. Editar un activo y borrar otro ya exportado → *Solo lo nuevo o editado*: el ZIP trae solo el editado y `deleted` con el borrado.
 5. Elegir *20 MB — correo* con muchas fotos: varias partes `parte1deN…`; cada edificio completo en una parte.
 6. Android: *Descargar* y adjuntar desde WhatsApp (Documento → Descargas). iPhone: *Compartir* directo.
+
+## Pruebas manuales — v0.3 F5 (reporte PDF)
+
+1. Exportar → *📄 Compartir reporte* → elegir WhatsApp (Android y iPhone): llega un PDF que se abre bien en el teléfono del destinatario.
+2. Revisar acentos y ñ (departamentos, nombres), tablas que pasan de página con encabezado repetido, número de página.
+3. Edificios → *📄 Reporte*: mismo PDF.
+4. En modo avión: el reporte se genera igual (se descarga o comparte cuando haya señal).
