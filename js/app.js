@@ -1,9 +1,9 @@
 import { APP_VERSION } from './version.js';
 import * as db from './db.js';
-import { parseBuildingsCsv, buildingsToCsv } from './csv.js';
 import * as assetsUi from './assets.js';
 import { recoverOrphanAudio } from './audio.js';
 import * as projects from './projects.js';
+import * as buildingsUi from './buildings.js';
 import { runMigrationGate } from './migrate.js';
 import { assignMissingDisplayIds } from './data.js';
 
@@ -59,7 +59,9 @@ const routes = {
   departamentos: () => assetsUi.viewDepartments(h),
   exportar: async () => (await import('./export.js')).viewExport($app, h),
   proyectos: () => projects.viewProjects(h),
-  edificios: viewBuildings, ajustes: viewSettings, ayuda: viewHelp
+  edificios: () => buildingsUi.viewBuildings(h),
+  edificio: (p) => buildingsUi.viewBuildingForm(h, p.get('id')),
+  ajustes: viewSettings, ayuda: viewHelp
 };
 const NO_PROJECT_OK = new Set(['proyectos', 'ajustes', 'ayuda']);
 // Renders are serialized: if the hash changes while a (slow) view is still loading, render again afterwards
@@ -72,11 +74,13 @@ async function render() {
 }
 async function renderOnce() {
   assetsUi.leave();
+  buildingsUi.leave();
   const [path, query = ''] = location.hash.replace(/^#\/?/, '').split('?');
   let route = path || '';
   if (!state.project && !NO_PROJECT_OK.has(route)) route = 'proyectos'; // everything else needs an active project
   document.body.dataset.route = route;
-  document.querySelectorAll('.topnav a').forEach((a) => a.classList.toggle('active', a.dataset.route === route));
+  const navRoute = route === 'edificio' ? 'edificios' : route;
+  document.querySelectorAll('.topnav a').forEach((a) => a.classList.toggle('active', a.dataset.route === navRoute));
   try { await (routes[route] || routes[''])(new URLSearchParams(query)); } catch (e) { reportError(e); }
   $app.focus({ preventScroll: true });
 }
@@ -187,104 +191,6 @@ async function viewSettings() {
     await reg.update().catch(() => {});
     if (!reg.waiting && !reg.installing) showBanner('upd-none', 'info', 'Ya tienes la última versión.', [{ label: 'OK', onClick: () => hideBanner('upd-none') }]);
   });
-}
-
-const byCode = (a, b) => a.code.localeCompare(b.code, 'es', { numeric: true });
-const projectBuildings = async () => (await db.getByProject('buildings', state.project.id)).sort(byCode);
-
-async function viewBuildings() {
-  const rows = await projectBuildings();
-  $app.innerHTML = `
-    <h1>Edificios <span class="muted h1-sub">${esc(state.project.name)}</span></h1>
-    <div class="card">
-      <p class="muted">CSV con exactamente 2 columnas: <code>BLDG #</code> y <code>BLDG NAME</code> (separador , o ;).</p>
-      <div class="row">
-        <button class="btn primary" id="import">Importar CSV</button>
-        <button class="btn" id="add">+ Agregar</button>
-        <button class="btn" id="export"${rows.length ? '' : ' disabled'}>Exportar CSV</button>
-      </div>
-      <input id="file" class="sr" type="file" accept=".csv,text/csv,text/plain" tabindex="-1">
-    </div>
-    <div class="card">
-      <strong>${rows.length} edificio${rows.length === 1 ? '' : 's'}</strong>
-      ${rows.length ? `<ul class="list">${rows.map((r) => `<li><span class="code">${esc(r.code)}</span><span class="name">${esc(r.name)}</span><button class="btn" data-edit="${esc(r.id)}">Editar</button></li>`).join('')}</ul>` : '<p class="muted">Aún no hay edificios. Importa un CSV o agrega uno.</p>'}
-    </div>`;
-  const $file = document.getElementById('file');
-  document.getElementById('import').onclick = () => { $file.value = ''; $file.click(); };
-  $file.onchange = () => importCsv($file.files[0]);
-  document.getElementById('add').onclick = () => editBuilding(null);
-  document.getElementById('export').onclick = () => download('edificios.csv', new Blob([buildingsToCsv(rows)], { type: 'text/csv;charset=utf-8' }));
-  $app.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => editBuilding(rows.find((r) => r.id === b.dataset.edit))));
-}
-
-async function importCsv(file) {
-  if (!file) return;
-  try {
-    const res = parseBuildingsCsv(await file.arrayBuffer());
-    if (res.errors.length && !res.rows.length) {
-      await ask('No se pudo importar', `<ul>${res.errors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul>`, [{ label: 'Cerrar', value: null, cls: 'primary' }]);
-      return;
-    }
-    const existing = await projectBuildings();
-    let body = `<p>Se leyeron <strong>${res.rows.length}</strong> edificios${res.encoding === 'windows-1252' ? ' (archivo en codificación ANSI/Windows-1252)' : ''}.</p>`;
-    if (res.duplicates.length) body += `<p class="bad">Códigos BLDG # duplicados (se conservó la primera aparición): ${res.duplicates.map((d) => `${esc(d.code)} (fila ${d.line})`).join(', ')}.</p>`;
-    if (res.errors.length) body += `<p class="bad">Filas omitidas:</p><ul>${res.errors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul>`;
-    if (existing.length) body += `<p>Ya tienes ${existing.length} edificios guardados. <strong>Reemplazar</strong> borra la lista actual; <strong>Fusionar</strong> agrega los nuevos y actualiza los nombres de los códigos que coincidan.</p>`;
-    const buttons = existing.length
-      ? [{ label: 'Reemplazar lista', value: 'replace', cls: 'danger' }, { label: 'Fusionar', value: 'merge', cls: 'primary' }, { label: 'Cancelar', value: null }]
-      : [{ label: 'Importar', value: 'replace', cls: 'primary' }, { label: 'Cancelar', value: null }];
-    const choice = await ask('Importar edificios', body, buttons);
-    if (!choice) return;
-    const pid = state.project.id;
-    const now = db.nowIso();
-    const fresh = (r) => ({ id: crypto.randomUUID(), project_id: pid, code: r.code, code_key: db.normKey(r.code), name: r.name, source: 'import', created_at: now, updated_at: now });
-    if (choice === 'merge') {
-      // Match existing codes case-insensitively so "b-01" updates "B-01" instead of creating a twin.
-      const byKey = new Map(existing.map((e) => [e.code_key, e]));
-      await db.putMany('buildings', res.rows.map((r) => { const e = byKey.get(db.normKey(r.code)); return e ? { ...e, name: r.name, updated_at: now } : fresh(r); }));
-    } else {
-      await db.deleteByProject('buildings', pid);
-      await db.putMany('buildings', res.rows.map(fresh));
-    }
-    showBanner('imp', 'info', 'Edificios importados ✓', [{ label: 'OK', onClick: () => hideBanner('imp') }]);
-    await viewBuildings();
-  } catch (e) { reportError(e); }
-}
-
-async function editBuilding(b) {
-  const isNew = !b;
-  $dlg.innerHTML = `<h2 style="margin-top:0">${isNew ? 'Agregar edificio' : 'Editar edificio'}</h2>
-    <label for="b-code">BLDG #</label><input id="b-code" type="text" value="${esc(b?.code ?? '')}"${isNew ? '' : ' readonly'} autocapitalize="characters">
-    <label for="b-name">BLDG NAME</label><input id="b-name" type="text" value="${esc(b?.name ?? '')}">
-    <p id="b-err" class="bad" role="alert"></p>
-    <div class="actions"><button class="btn primary" id="b-save">Guardar</button>${isNew ? '' : '<button class="btn danger" id="b-del">Borrar edificio</button>'}<button class="btn" id="b-cancel">Cancelar</button></div>`;
-  $dlg.onclose = null;
-  $dlg.showModal();
-  document.getElementById('b-cancel').onclick = () => $dlg.close();
-  document.getElementById('b-save').onclick = async () => {
-    const code = db.cleanText(document.getElementById('b-code').value);
-    const name = db.cleanText(document.getElementById('b-name').value);
-    const err = document.getElementById('b-err');
-    if (!code || !name) { err.textContent = 'Completa ambos campos.'; return; }
-    try {
-      const now = db.nowIso();
-      if (isNew) {
-        const all = await projectBuildings();
-        if (all.some((x) => x.code_key === db.normKey(code))) { err.textContent = 'Ya existe un edificio con ese BLDG # en este proyecto.'; return; }
-        await db.put('buildings', { id: crypto.randomUUID(), project_id: state.project.id, code, code_key: db.normKey(code), name, source: 'manual', created_at: now, updated_at: now });
-      } else {
-        await db.put('buildings', { ...b, name, updated_at: now });
-      }
-      $dlg.close(); await viewBuildings();
-    } catch (e) { err.textContent = 'Error: ' + e.message; }
-  };
-  const del = document.getElementById('b-del');
-  if (del) del.onclick = async () => {
-    $dlg.close();
-    if (await confirmDlg('Borrar edificio', `<p>¿Borrar <strong>${esc(b.code)}</strong> (${esc(b.name)})? Los activos ya registrados conservan su copia del nombre.</p>`, 'Borrar', 'danger')) {
-      try { await db.del('buildings', b.id); await viewBuildings(); } catch (e) { reportError(e); }
-    }
-  };
 }
 
 function viewHelp() {
