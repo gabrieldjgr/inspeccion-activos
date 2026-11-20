@@ -66,7 +66,7 @@ export async function viewBuildings(h) {
   const pct = rows.length ? Math.round((totals.inspected / rows.length) * 100) : 0;
 
   h.$app.innerHTML = `
-    <h1>Edificios <span class="muted h1-sub">${h.esc(h.state.project.name)}</span></h1>
+    <h1>Edificios</h1>
     ${rows.length ? `<div class="card bprog">
       <div class="bprog-head"><strong>${totals.inspected} de ${rows.length} inspeccionados</strong><span>${pct} % <button type="button" class="btn bpdf" id="b-pdf">📄 Reporte</button></span></div>
       <div class="bar"><i style="width:${pct}%"></i></div>

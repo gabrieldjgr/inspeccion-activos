@@ -6,6 +6,7 @@ import { mountPhotos } from './photos.js';
 import { mountAudio } from './audio.js';
 import { projectDialog } from './projects.js';
 import { addTombstone } from './ai-export.js';
+import { buildingStatus } from './bldg-schema.js';
 
 let cleanup = null;
 export function leave() { if (cleanup) { const c = cleanup; cleanup = null; try { c(); } catch (e) { console.error(e); } } }
@@ -365,7 +366,9 @@ export async function viewHome(h, params) {
   if (filters.pid !== pid) Object.assign(filters, { pid, quick: 'all', b: '', f: '', d: '', q: '', limit: 50 }); // filters belong to one project
   const qf = params?.get?.('f');
   if (qf && QUICK[qf]) Object.assign(filters, { quick: qf, b: '', f: '', d: '', q: '', limit: 50 });
-  const [nB, inspector, info, all, media] = await Promise.all([db.countByProject('buildings', pid), db.getSetting('inspector', ''), h.storageInfo(), db.getByProject('assets', pid), mediaIndex()]);
+  const [blds, inspector, info, all, media] = await Promise.all([db.getByProject('buildings', pid), db.getSetting('inspector', ''), h.storageInfo(), db.getByProject('assets', pid), mediaIndex()]);
+  const nB = blds.length;
+  const nInspected = blds.filter((b) => buildingStatus(b, countsOf(media, b.id)) === 'inspected').length;
 
   // Drafts: drop empty ones, offer to continue the rest.
   let draft = null;
@@ -378,6 +381,13 @@ export async function viewHome(h, params) {
   const today = saved.filter((x) => (x.created_at || '').slice(0, 10) === todayKey()).length;
   const pending = saved.filter(isPending).length;
   const noPhoto = saved.filter((x) => !countsOf(media, x.id).photo).length;
+  // Backup reminder: records neither backed up nor exported (both put the data outside the phone).
+  const lastBackup = await db.getSetting(`last_backup|${pid}`, '');
+  const unsafe = saved.filter((a) => String(a.updated_at) > String(lastBackup || '') && isPending(a));
+  const oldestUnsafe = unsafe.reduce((m, a) => (!m || a.updated_at < m ? a.updated_at : m), '');
+  const hoursUnsafe = oldestUnsafe ? (Date.now() - Date.parse(oldestUnsafe)) / 3600000 : 0;
+  let snoozed = false; try { snoozed = sessionStorage.getItem('backup-snooze|' + pid) === '1'; } catch (_) { /* ignore */ }
+  const remind = !h.state.project.demo && !snoozed && (unsafe.length >= 25 || (unsafe.length && hoursUnsafe >= 48));
 
   if (info.quota && info.usage != null) {
     const free = info.quota - info.usage;
@@ -395,15 +405,25 @@ export async function viewHome(h, params) {
   const quickCount = { all: saved.length, today, nophoto: noPhoto, pending };
 
   h.$app.innerHTML = `
-    <h1>Inicio <span class="muted h1-sub">${h.esc(h.state.project.name)}</span></h1>
+    <section class="hero">
+      <div class="eyebrow">${h.esc(new Date().toLocaleDateString('es', { weekday: 'long', day: 'numeric', month: 'long' }))}</div>
+      <h1>${inspector ? `Hola, ${h.esc(inspector.split(/\s+/)[0])}` : 'Inicio'}</h1>
+    </section>
+    ${h.state.project.demo ? `<div class="card demo-card"><div class="demo-badge">DEMO</div><strong>Estás en el proyecto de prueba</strong>
+      <p class="muted small">Tiene edificios, activos y fotos de ejemplo para que veas cómo funciona todo. Explora, edita y exporta sin miedo. Cuando vayas a campo, crea tu proyecto real.</p>
+      <div class="row"><a class="btn primary" href="#/proyectos">Crear mi proyecto</a><a class="btn" href="#/ayuda">Guía rápida</a></div></div>` : ''}
+    ${remind ? `<div class="card remind" id="remind"><strong>⚠ ${unsafe.length} activo${unsafe.length === 1 ? '' : 's'} solo en este teléfono</strong>
+      <p class="small">${hoursUnsafe >= 24 ? `Desde hace ${Math.floor(hoursUnsafe / 24)} día${Math.floor(hoursUnsafe / 24) === 1 ? '' : 's'}` : 'Registrados hoy'}, sin respaldo ni exportación. Si el teléfono se pierde o se daña, se pierden.</p>
+      <div class="row"><a class="btn primary" href="#/exportar">Exportar o respaldar</a><button class="btn" id="remind-later">Más tarde</button></div></div>` : ''}
     ${todo.length ? `<div class="card"><strong>Configuración pendiente</strong><ul>${todo.join('')}</ul></div>` : ''}
     ${draft ? `<div class="card draft"><strong>${draft.copied_from ? 'Tienes una copia sin guardar' : 'Tienes un borrador sin guardar'}</strong><p class="muted">${h.esc([draft.building_code, draft.floor && floorLabel(draft.floor), draft.department].filter(Boolean).join(' · ') || 'Sin contexto')}</p>
       <div class="row"><a class="btn primary" href="#/activo?id=${h.esc(draft.id)}">Continuar</a></div></div>` : ''}
     <a class="btn big primary" href="#/nuevo" id="new-asset">+ Nuevo activo</a>
-    <div class="card stats">
-      <div><strong>${today}</strong><span>hoy</span></div>
-      <div><strong>${saved.length}</strong><span>total</span></div>
-      <div><strong>${pending}</strong><span>por exportar</span></div>
+    <div class="stats">
+      <div><strong>${today}</strong><span>activos hoy</span></div>
+      <div><strong>${saved.length}</strong><span>activos total</span></div>
+      <div class="${pending ? 'st-warn' : ''}"><strong>${pending}</strong><span>por exportar</span></div>
+      <a href="#/edificios" class="st-b"><strong>${nInspected}<small>/${nB}</small></strong><span>edificios listos</span></a>
     </div>
     <div class="section-title">Activos registrados</div>
     <div class="qchips" role="group" aria-label="Filtro rápido">${Object.entries(QUICK).map(([k, l]) => `<button type="button" class="qchip${filters.quick === k ? ' on' : ''}${k === 'nophoto' && noPhoto ? ' warn' : ''}" data-q="${k}">${l}${quickCount[k] != null ? ` <b>${quickCount[k]}</b>` : ''}</button>`).join('')}</div>
@@ -417,7 +437,11 @@ export async function viewHome(h, params) {
     </div>
     <div id="list"></div>
     <div class="card">${h.storageHtml(info)}</div>
-    <a class="fab" href="#/nuevo" aria-label="Nuevo activo">+</a>`;
+    <a class="fab off" href="#/nuevo" aria-label="Nuevo activo">+</a>`;
+  // The floating "+" appears only when the big "Nuevo activo" button is out of view.
+  let io = null;
+  const fab = h.$app.querySelector('.fab'); const cta = h.$app.querySelector('#new-asset');
+  if (fab && cta && 'IntersectionObserver' in window) { io = new IntersectionObserver(([e]) => fab.classList.toggle('off', e.isIntersecting)); io.observe(cta); } else fab?.classList.remove('off');
 
   const $list = h.$app.querySelector('#list');
   let urls = [];
@@ -459,6 +483,7 @@ export async function viewHome(h, params) {
     const hl = $list.querySelector('.asset-item.hl');
     if (hl) { hl.scrollIntoView({ block: 'center' }); h.state.highlight = null; }
   };
+  const rl = h.$app.querySelector('#remind-later'); if (rl) rl.onclick = () => { try { sessionStorage.setItem('backup-snooze|' + pid, '1'); } catch (_) { /* ignore */ } h.$app.querySelector('#remind').remove(); };
   h.$app.querySelectorAll('.qchip').forEach((b) => (b.onclick = () => {
     filters.quick = b.dataset.q; filters.limit = 50;
     h.$app.querySelectorAll('.qchip').forEach((x) => x.classList.toggle('on', x === b));
@@ -467,5 +492,5 @@ export async function viewHome(h, params) {
   const bind = (sel, key, ev = 'change') => h.$app.querySelector(sel).addEventListener(ev, (e) => { filters[key] = e.target.value; filters.limit = 50; drawList(); });
   bind('#f-b', 'b'); bind('#f-f', 'f'); bind('#f-d', 'd'); bind('#f-q', 'q', 'input');
   drawList();
-  cleanup = () => { urls.forEach((u) => URL.revokeObjectURL(u)); urls = []; };
+  cleanup = () => { urls.forEach((u) => URL.revokeObjectURL(u)); urls = []; io?.disconnect(); };
 }
