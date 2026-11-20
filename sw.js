@@ -1,7 +1,7 @@
 /* Service worker (classic script). Bump VERSION on every release: it changes this file's bytes,
    which is what makes the browser install the new worker. Keep in sync with js/version.js
    (tools/check-precache.mjs verifies it). */
-const VERSION = '0.3.1';
+const VERSION = '0.3.2';
 const CACHE = 'inspeccion-activos-' + VERSION;
 
 // Paths are relative to this file. Exact lowercase names: GitHub Pages is case-sensitive.
@@ -22,6 +22,8 @@ const PRECACHE = [
   'js/projects.js',
   'js/migrate.js',
   'js/camera.js',
+  'js/buildings.js',
+  'js/bldg-schema.js',
   'vendor/fflate.esm.js',
   'css/photos.css',
   'css/audio.css',

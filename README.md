@@ -2,7 +2,7 @@
 
 App web instalable para registrar activos en campo, 100 % offline después de la primera carga. Sitio estático (HTML + CSS + JS, sin build) pensado para GitHub Pages. La especificación completa está en `BRIEF_App_Inspeccion_Activos.md`.
 
-**Estado: v0.3.1 — F0 (proyectos) y F1 (captura rápida) del plan v0.3.** Sobre la base v0.2 (registro, fotos, audio, exportación ZIP, respaldo) se agregan proyectos, código de valuador, paquete de proyecto y la migración segura de los datos existentes. Verificado en Chromium de escritorio con pruebas automatizadas (migración v1→v2 con datos reales de v0.2.2, fallo simulado a mitad de la migración, aislamiento entre proyectos, paquetes y restauración de respaldos v1/v2). **Sin probar aún en dispositivo real:** cámara, micrófono, compartir y modo avión (ver pruebas manuales abajo).
+**Estado: v0.3.2 — F0 (proyectos), F1 (captura rápida) y F2 (edificios estructurados) del plan v0.3.** Sobre la base v0.2 (registro, fotos, audio, exportación ZIP, respaldo) se agregan proyectos, código de valuador, paquete de proyecto y la migración segura de los datos existentes. Verificado en Chromium de escritorio con pruebas automatizadas (migración v1→v2 con datos reales de v0.2.2, fallo simulado a mitad de la migración, aislamiento entre proyectos, paquetes y restauración de respaldos v1/v2). **Sin probar aún en dispositivo real:** cámara, micrófono, compartir y modo avión (ver pruebas manuales abajo).
 
 ## Estructura
 
@@ -10,6 +10,7 @@ App web instalable para registrar activos en campo, 100 % offline después de la
 index.html  styles.css  manifest.webmanifest  sw.js  .nojekyll
 js/    app.js (rutas, ajustes, edificios) · assets.js (formulario, lista, departamentos) · data.js (contratos de datos)
        projects.js (proyectos, paquete de proyecto) · migrate.js (pantalla de migración v1→v2) · camera.js (cámara rápida, beta)
+       buildings.js (lista con estados y formulario de edificio) · bldg-schema.js (columnas del Excel, listas, unidades)
        photos.js · audio.js · export.js · db.js (IndexedDB) · csv.js · version.js
 css/   photos.css · audio.css · export.css      vendor/ fflate.esm.js (ZIP, vendorizado)
 icons/ iconos PNG (any, maskable, apple-touch)
@@ -96,6 +97,16 @@ B-05,"Taller de Mantenimiento, Anexo"
 - **Lista**: miniaturas grandes, ID en negrita, filtros rápidos (Todos, Hoy, Sin foto, Sin nota, Por exportar, Copias), búsqueda por ID, botón flotante **+**.
 - **Modo sol** (Ajustes → Pantalla): alto contraste para trabajar al aire libre.
 
+## Edificios (v0.3 F2)
+
+- El formulario refleja las 33 columnas del Excel de levantamiento (A–AG), agrupadas en secciones plegables con avance (p. ej. *Construcción 3/5*): Identificación, Geometría, Áreas, Construcción, Riesgo y sostenibilidad, Servicios y **Valores de gabinete** (columnas redondeadas H, J, L, M, P, R: opcionales, normalmente de la precarga u oficina). Ningún campo es obligatorio.
+- **Listas** iguales a las del Excel; *Otro valor* agrega un valor (en mayúsculas) disponible para todo el proyecto (store `lists`). **HVAC: tipo** depende de la categoría con las listas de *Aux_List* (HEATING ONLY 11, HEATING AND COOLING 5, COOLING ONLY 4, NO → N/A).
+- **Medidas**: área, perímetro y altura aceptan una operación (`45.5*10.5 + 85*108.5`, coma o punto decimal, `x` como multiplicación) en la unidad del botón (m/ft, m²/ft²). Se guarda la operación, el valor y su unidad, y se muestra la conversión a la unidad del proyecto. La unidad elegida se recuerda por proyecto.
+- Año acepta `1980` o `1960-1990`; *Niveles + sótanos* es texto (`1 + MEZZANINE`); `%` se captura 0–100 (se exporta como fracción, igual que el Excel).
+- Fotos, notas de voz y notas generales por edificio (mismos módulos que los activos; `blobs.asset_id` = id del edificio).
+- **Estados**: *Pendiente* (nada capturado en campo; la precarga no cuenta), *En proceso* (alguna foto, audio, nota o campo editado), *Inspeccionado* (botón *Marcar inspeccionado*, exige ≥ 1 foto y avisa qué campos faltan sin bloquear; si se borran todas las fotos vuelve a *En proceso*). La lista muestra contadores que funcionan como filtros, barra de avance, búsqueda y por edificio: fotos, audios, activos y campos llenos.
+- Exportar ZIP incluye `edificios/{CÓDIGO}/edificio.json` (campos en unidades del proyecto + medidas originales con su operación), fotos, audios y `notas.txt`, y `edificios.csv` con las 33 columnas en el orden y encabezados del Excel más columnas de la app. El respaldo completo incluye datos y medios de los edificios.
+
 ## Formato del ZIP exportado
 
 `inspeccion_{proyecto}_{device8}_{YYYYMMDD-HHmm}_parte{n}.zip` (la estructura definitiva para IA llega en F4) con `manifest.json` (con `project` y `valuer_code`), `activos.csv` (UTF-8 con BOM), `activos.json`, `edificios.csv` y `activos/{BLDG}_{seq4}_{uuid8}/` con `activo.json`, `foto_NN.jpg`, `captura_NN.png`, `audio_NN.webm|m4a` y `notas.txt`. Se parte en varios ZIP según el tamaño máximo elegido. El respaldo completo (`respaldo_*.zip`) se restaura desde Exportar → *Restaurar respaldo*.
@@ -144,3 +155,13 @@ La app solo graba los audios. Para transcribirlos en tu PC (Whisper local, espa�
 8. Ajustes → Pantalla → **Modo sol**: probar al sol, con guantes.
 9. Lista: filtros *Sin foto* / *Copias*, búsqueda por "A001".
 10. Exportar: el ZIP trae `activos/B14-XX-A001_…/foto_01_placa.jpg` y `display_id` en `activos.csv`. Revisar si el audio sale `.m4a` o `.webm` en el S21.
+
+## Pruebas manuales — v0.3 F2 (edificios)
+
+1. Edificios: ver contadores Pendientes / En proceso / Inspeccionados y tocarlos para filtrar.
+2. Abrir un edificio: llenar Ocupación, Año (`1960-1990`), Niveles, Altura en m (ver conversión a ft), un área con operación en m² (`12*95.5`), Muros con *Otro valor* (debe aparecer luego en otro edificio), HVAC categoría → tipo, Sí/No de servicios.
+3. Sin foto, *Marcar inspeccionado* está desactivado. Tomar 1 foto → marcar → revisa la lista de campos vacíos → *Inspeccionado*.
+4. Grabar una nota de voz describiendo el edificio.
+5. Cerrar la app a mitad de la captura y reabrir: nada se pierde.
+6. Exportar (Todos): el ZIP trae `edificios/B1/edificio.json` y la foto; abrir `edificios.csv` en Excel y comparar columnas con la plantilla original.
+7. Usar el formulario con guantes y al sol (modo sol): ¿los botones de lista y Sí/No son cómodos?

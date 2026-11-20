@@ -15,7 +15,7 @@ const floorLabel = (f) => (/^\d+$/.test(f) ? `Piso ${f}` : f);
 // ---------- searchable picker (dialog) ----------
 // items: [{value,label,sub}]. Resolves {value} | {created:text} | null. With newLabel, a "+ newLabel"
 // button is always available (created:'' when nothing was typed).
-function pick(h, { title, items, newLabel, newAlways = false, current }) {
+export function pick(h, { title, items, newLabel, newAlways = false, current }) {
   return new Promise((resolve) => {
     const d = h.$dlg;
     d.innerHTML = `<h2 style="margin-top:0">${h.esc(title)}</h2>
@@ -56,7 +56,7 @@ export function suggestBuildingCode(buildings) {
   for (const b of buildings) { const m = /^B(\d+)$/i.exec(b.code); if (m) max = Math.max(max, Number(m[1])); }
   return `B${max + 1}`;
 }
-function quickBuilding(h, project, buildings, typed) {
+export function quickBuilding(h, project, buildings, typed) {
   return new Promise((resolve) => {
     const looksLikeCode = typed && /^[A-Za-z]{0,3}-?\d{1,4}[A-Za-z]?$/.test(typed.trim());
     const code0 = looksLikeCode ? typed.trim().toUpperCase() : suggestBuildingCode(buildings);

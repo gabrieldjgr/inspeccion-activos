@@ -9,8 +9,9 @@ import { Zip, ZipPassThrough, ZipDeflate, unzipSync, strToU8, strFromU8 } from '
 import * as db from './db.js';
 import { APP_VERSION } from './version.js';
 import { csvEscape, buildingsToCsv } from './csv.js';
-import { getSavedAssets, getMedia, isPending, deleteAsset, folderName, blobId, nowIso } from './data.js';
+import { getSavedAssets, getMedia, isPending, deleteAsset, folderName, blobId, nowIso, mediaIndex, countsOf } from './data.js';
 import { projectSlug, createProject } from './projects.js';
+import { FIELDS, DATA_FIELDS, headerFor, measureIn, buildingStatus, projectUnit } from './bldg-schema.js';
 
 const PART_OVERHEAD = 4096; // estimated bytes of JSON/CSV/txt per asset for partition planning
 const CSV_COLUMNS = ['display_id', 'id', 'seq', 'inspector', 'created_at', 'building_code', 'building_name', 'floor', 'department', 'notes', 'n_photos', 'n_audios', 'photo_tags', 'copied_from', 'folder', 'gps_lat', 'gps_lon', 'gps_accuracy_m'];
@@ -158,10 +159,65 @@ async function markExported(entries, exportedAt) {
   }));
 }
 
+// ---------------------------------------------------------------- buildings in the export
+
+// Field value as it goes to the Excel-shaped outputs: measures in project units, % as a fraction (1 = 100 %)
+// like the Excel column AA, lists/text as typed.
+export function excelValue(f, b, units) {
+  if (f.key === 'code') return b.code;
+  if (f.key === 'name') return b.name;
+  const v = b.fields?.[f.key];
+  if (v == null || v === '') return null;
+  if (f.type === 'area' || f.type === 'length') return measureIn(v, f.type, units);
+  if (f.type === 'percent') return Math.round((Number(v) / 100) * 10000) / 10000;
+  return v;
+}
+const BUILDING_EXTRA = ['building_id', 'status', 'inspected_at', 'n_photos', 'n_audios', 'n_assets', 'source', 'notes'];
+// edificios.csv: the 33 Excel columns (same order and headers, units of the project) + app columns.
+export function buildingsFullCsv(rows, units) {
+  const head = [...FIELDS.map((f) => headerFor(f, units).replace(/\n/g, ' ')), ...BUILDING_EXTRA];
+  const lines = [head.map(csvEscape).join(',')];
+  for (const r of rows) {
+    lines.push([...FIELDS.map((f) => csvEscape(excelValue(f, r.b, units) ?? '')), r.b.id, r.status, r.b.inspected_at || '', r.photos, r.audios, r.assets, r.b.source || '', csvEscape(r.b.notes || '')].join(','));
+  }
+  return '\uFEFF' + lines.join('\r\n') + '\r\n';
+}
+export function buildBuildingDoc(b, { photos, audios, names, units, status, nAssets, exportedAt }) {
+  const fields = {};
+  const measures = {};
+  for (const f of DATA_FIELDS) {
+    fields[f.key] = excelValue(f, b, units);
+    const v = b.fields?.[f.key];
+    if ((f.type === 'area' || f.type === 'length') && v) measures[f.key] = { value: v.value, unit: v.unit, expression: v.expr || null, value_in_project_units: measureIn(v, f.type, units), project_unit: projectUnit(f.type, units) };
+  }
+  return {
+    schema_version: 1, id: b.id, project_id: b.project_id, code: b.code, name: b.name, status, inspected_at: b.inspected_at || null,
+    source: b.source || null, created_by: b.created_by || null, updated_at: b.updated_at || null, field_updated_at: b.field_updated_at || null,
+    units, fields, measures, notes: b.notes || '', n_assets: nAssets,
+    photos: photos.map((p, i) => ({ file: names.photoNames[i], width: p.width ?? null, height: p.height ?? null, captured_at: p.captured_at ?? null, tag: p.tag ?? null })),
+    audios: audios.map((x, i) => ({ file: names.audioNames[i], mime_type: x.mime_type ?? null, duration_s: x.duration_s ?? null, recorded_at: x.recorded_at ?? null })),
+    exported_at: exportedAt
+  };
+}
+const buildingHasContent = (b, c) => !!(c.photo || c.audio || String(b.notes || '').trim() || (b.fields && Object.keys(b.fields).length) || b.inspected_at);
+const buildingPending = (b) => !b.exported_at || String(b.updated_at || '') > String(b.exported_at);
+async function markBuildingsExported(entries, exportedAt) {
+  await db.tx('buildings', 'readwrite', (s) => new Promise((resolve, reject) => {
+    let left = entries.length;
+    if (!left) { resolve(); return; }
+    for (const e of entries) {
+      const g = s.get(e.id);
+      g.onsuccess = () => { const r = g.result; if (r && r.updated_at === e.updated_at) s.put({ ...r, exported_at: exportedAt }); if (--left === 0) resolve(); };
+      g.onerror = () => reject(g.error);
+    }
+  }));
+}
+const safeDir = (s) => String(s || 'SIN-CODIGO').trim().replace(/[^\w.-]+/g, '-');
+
 async function readBlobBytes(rec) { return new Uint8Array(await rec.blob.arrayBuffer()); }
 
 async function sizesOf(asset) {
-  const [ph, au] = await Promise.all([getMedia(asset.id, 'photo'), getMedia(asset.id, 'audio')]);
+  const [ph, au] = await Promise.all([getMedia(asset.id, 'photo'), getMedia(asset.id, 'audio')]); // asset or building id
   let size = PART_OVERHEAD;
   for (const m of ph) size += m.blob?.size || 0;
   for (const m of au) size += m.blob?.size || 0;
@@ -176,19 +232,27 @@ export async function exportZip(h, opts) {
   const project = h.state.project;
   const all = await getSavedAssets(project.id);
   const assets = filterAssets(all, scope).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)) || (a.seq ?? 0) - (b.seq ?? 0));
-  if (!assets.length) return { parts: 0, assets: 0 };
+  const units = project.units || 'imperial';
+  const [inspector, buildings, media] = await Promise.all([db.getSetting('inspector', ''), db.getByProject('buildings', project.id), mediaIndex()]);
+  buildings.sort((a, b) => a.code.localeCompare(b.code, 'es', { numeric: true }));
+  const nAssetsOf = (b) => all.filter((a) => a.building_id === b.id || (!a.building_id && db.normKey(a.building_code) === b.code_key)).length;
+  const bRows = buildings.map((b) => { const c = countsOf(media, b.id); return { b, c, status: buildingStatus(b, c), photos: c.photo, audios: c.audio, assets: nAssetsOf(b) }; });
+  // Buildings with field data/media go in the ZIP (folder per building) according to the same scope.
+  const bInScope = bRows.filter((r) => buildingHasContent(r.b, r.c) && (
+    scope.type === 'all' || (scope.type === 'pending' && buildingPending(r.b)) || (scope.type === 'building' && r.b.code === scope.building_code)
+    || (scope.type === 'dates' && (() => { const d = String(r.b.updated_at || '').slice(0, 10); return (!scope.from || d >= scope.from) && (!scope.to || d <= scope.to); })())));
+  if (!assets.length && !bInScope.length) return { parts: 0, assets: 0, buildings: 0 };
 
-  const total = assets.length;
+  const total = assets.length + bInScope.length;
   const items = [];
-  for (let i = 0; i < total; i++) {
-    onProgress?.(i, total, 'Calculando tamaños…');
+  for (let i = 0; i < bInScope.length; i++) { onProgress?.(i, total, 'Calculando tamaños…'); items.push({ building: bInScope[i], size: await sizesOf(bInScope[i].b) }); }
+  for (let i = 0; i < assets.length; i++) {
+    onProgress?.(bInScope.length + i, total, 'Calculando tamaños…');
     items.push({ asset: assets[i], size: await sizesOf(assets[i]) });
   }
   const groups = partitionBySize(items, maxPartBytes);
   const totalParts = groups.length;
-
-  const [inspector, buildings] = await Promise.all([db.getSetting('inspector', ''), db.getByProject('buildings', project.id)]);
-  const buildingsCsv = buildingsToCsv(buildings.map((b) => ({ code: b.code, name: b.name })).sort((a, b) => a.code.localeCompare(b.code, 'es', { numeric: true })));
+  const buildingsCsv = buildingsFullCsv(bRows, units);
   const device8 = String(h.state.deviceId || 'sin-id').slice(0, 8);
   const startedAt = new Date();
   const stamp = fileStamp(startedAt);
@@ -203,10 +267,23 @@ export async function exportZip(h, opts) {
     w.addText('manifest.json', JSON.stringify({
       schema_version: 1, app_version: APP_VERSION, device_id: h.state.deviceId, inspector, exported_at: exportedAt,
       project: { id: project.id, name: project.name, client: project.client, site: project.site, units: project.units }, valuer_code: project.valuer_code || null,
-      part: p + 1, total_parts: totalParts, n_assets: group.length, filter: scope
+      part: p + 1, total_parts: totalParts, n_assets: group.filter((x) => x.asset).length, n_buildings: group.filter((x) => x.building).length, filter: scope
     }, null, 2));
     w.addText('edificios.csv', buildingsCsv);
-    for (const { asset } of group) {
+    const bMarks = [];
+    for (const { building: r } of group.filter((x) => x.building)) {
+      onProgress?.(done, total, `Parte ${p + 1} de ${totalParts}`);
+      const [photos, audios] = await Promise.all([getMedia(r.b.id, 'photo'), getMedia(r.b.id, 'audio')]);
+      const names = mediaNames(photos, audios);
+      const dir = `edificios/${safeDir(r.b.code)}/`;
+      w.addText(dir + 'edificio.json', JSON.stringify(buildBuildingDoc(r.b, { photos, audios, names, units, status: r.status, nAssets: r.assets, exportedAt }), null, 2));
+      w.addText(dir + 'notas.txt', notesText(r.b));
+      for (let i = 0; i < photos.length; i++) w.addStored(dir + names.photoNames[i], await readBlobBytes(photos[i]));
+      for (let i = 0; i < audios.length; i++) w.addStored(dir + names.audioNames[i], await readBlobBytes(audios[i]));
+      bMarks.push({ id: r.b.id, updated_at: r.b.updated_at });
+      done++;
+    }
+    for (const { asset } of group.filter((x) => x.asset)) {
       onProgress?.(done, total, `Parte ${p + 1} de ${totalParts}`);
       const [photos, audios] = await Promise.all([getMedia(asset.id, 'photo'), getMedia(asset.id, 'audio')]);
       const names = mediaNames(photos, audios);
@@ -228,10 +305,11 @@ export async function exportZip(h, opts) {
     chunks.length = 0;
     // Only after the part was generated successfully: mark as exported (updated_at untouched).
     await markExported(marks, exportedAt);
-    onPart?.({ n: p + 1, total: totalParts, name: partFileName(projectSlug(project), device8, stamp, p + 1), blob, nAssets: group.length });
+    await markBuildingsExported(bMarks, exportedAt);
+    onPart?.({ n: p + 1, total: totalParts, name: partFileName(projectSlug(project), device8, stamp, p + 1), blob, nAssets: marks.length, nBuildings: bMarks.length });
     await new Promise((r) => setTimeout(r)); // let the UI breathe between parts
   }
-  return { parts: totalParts, assets: total };
+  return { parts: totalParts, assets: assets.length, buildings: bInScope.length };
 }
 
 // ---------------------------------------------------------------- full backup
@@ -272,6 +350,21 @@ export async function exportBackup(h, onProgress) {
     w.addText(dir + 'activo.json', JSON.stringify({ asset: a, photos: pMeta, thumbs: tMeta, audios: aMeta }, null, 2));
     for (const [name, rec] of files) w.addStored(name, await readBlobBytes(rec));
     onProgress?.(i + 1, assets.length, 'Respaldo');
+  }
+  // Building media (v0.3 F2): owner = building id. Building data itself is in backup.json.
+  if (version >= 2) {
+    for (const b of buildings) {
+      const [photos, thumbs, audios] = await Promise.all([getMedia(b.id, 'photo'), getMedia(b.id, 'thumb'), getMedia(b.id, 'audio')]);
+      if (!photos.length && !audios.length) continue;
+      const dir = `edificios/${b.id}/`;
+      const files = [];
+      const meta = { owner_id: b.id, photos: [], thumbs: [], audios: [] };
+      for (const p of photos) { const f = `photo_${p.uid}.${extOf(p, 'jpg')}`; meta.photos.push(metaOf(p, f)); files.push([dir + f, p]); }
+      for (const t of thumbs) { const f = `thumb_${t.uid}.jpg`; meta.thumbs.push(metaOf(t, f)); files.push([dir + f, t]); }
+      for (const x of audios) { const f = `audio_${x.uid}.${extOf(x, 'webm')}`; meta.audios.push(metaOf(x, f)); files.push([dir + f, x]); }
+      w.addText(dir + 'media.json', JSON.stringify(meta, null, 2));
+      for (const [name, rec] of files) w.addStored(name, await readBlobBytes(rec));
+    }
   }
   const chunks = await w.finish();
   const blob = new Blob(chunks, { type: 'application/zip' });
@@ -377,6 +470,27 @@ export async function importBackup(file, h, onProgress) {
       res.errors.push(`${key}: ${e.message}`);
       if (isMemoryError(e)) { res.errors.push('Memoria insuficiente: se detuvo la restauración.'); break; }
     }
+  }
+  // Building media: added if missing (blob ids are unique), owner remapped like the assets' building_id.
+  for (const key of Object.keys(files).filter((k) => /^edificios\/[^/]+\/media\.json$/.test(k))) {
+    const dir = key.slice(0, key.lastIndexOf('/') + 1);
+    try {
+      const doc = JSON.parse(strFromU8(files[key]));
+      const owner = map.buildingIdFor({ building_id: doc.owner_id });
+      if (!owner || !(await db.get('buildings', owner))) continue;
+      const blobs = [];
+      for (const [kind, list] of [['photo', doc.photos], ['thumb', doc.thumbs], ['audio', doc.audios]]) {
+        for (const m of list || []) {
+          const bytes = files[dir + m.file];
+          if (!bytes) { res.errors.push(`Edificio ${owner.slice(0, 8)}: falta el archivo ${m.file}.`); continue; }
+          const id = blobId(kind, owner, m.uid);
+          if (await db.get('blobs', id)) continue;
+          const { file: _f, ...rec } = m;
+          blobs.push({ ...rec, id, asset_id: owner, kind, blob: new Blob([bytes], { type: m.mime_type || '' }) });
+        }
+      }
+      if (blobs.length) await db.tx('blobs', 'readwrite', (st) => { for (const b of blobs) st.put(b); });
+    } catch (e) { res.errors.push(`${key}: ${e.message}`); }
   }
   // Settings: fill in the missing ones; seq_counter = max of everything. NEVER touch device_id.
   const sett = backup.settings || {};
@@ -531,12 +645,12 @@ export async function viewExport($app, h) {
       const r = await exportZip(h, {
         scope, maxPartBytes: Number($('x-max').value) * 1048576,
         onProgress: (d, t, label) => { bar.max = t; bar.value = d; $('x-ptext').textContent = d >= t ? `Activo ${t} de ${t}` : `Activo ${Math.min(d + 1, t)} de ${t} · ${label}`; },
-        onPart: (p) => { nParts++; addPartRow($('x-parts'), p.name, p.blob, `${p.nAssets} activo${p.nAssets === 1 ? '' : 's'} · parte ${p.n} de ${p.total}`); }
+        onPart: (p) => { nParts++; addPartRow($('x-parts'), p.name, p.blob, `${p.nAssets} activo${p.nAssets === 1 ? '' : 's'}${p.nBuildings ? ` + ${p.nBuildings} edificio${p.nBuildings === 1 ? '' : 's'}` : ''} · parte ${p.n} de ${p.total}`); }
       });
-      if (!r.assets) say('x-msg', 'muted', 'No hay activos que coincidan con el alcance elegido.');
+      if (!r.assets && !r.buildings) say('x-msg', 'muted', 'No hay activos ni edificios que coincidan con el alcance elegido.');
       else {
         bar.value = bar.max;
-        say('x-msg', 'ok', `Listo: ${r.assets} activo${r.assets === 1 ? '' : 's'} en ${r.parts} parte${r.parts === 1 ? '' : 's'}. Descarga o comparte cada parte (se marcaron como exportados).`);
+        say('x-msg', 'ok', `Listo: ${r.assets} activo${r.assets === 1 ? '' : 's'}${r.buildings ? ` y ${r.buildings} edificio${r.buildings === 1 ? '' : 's'}` : ''} en ${r.parts} parte${r.parts === 1 ? '' : 's'}. Descarga o comparte cada parte (se marcaron como exportados).`);
       }
     } catch (e) {
       console.error(e);
