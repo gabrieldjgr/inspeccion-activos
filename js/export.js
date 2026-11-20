@@ -263,6 +263,12 @@ export async function viewExport($app, h) {
       <ul id="x-parts" class="x-parts"></ul>
     </div>
     <div class="card">
+      <h2 class="x-h">Reporte de avance (PDF)</h2>
+      <p class="muted small">Edificios inspeccionados contra pendientes, activos por edificio, piso y departamento, y registros sin foto, sin nota o sin placa. Se comparte directo a WhatsApp, Teams, correo o Drive.</p>
+      <div class="row"><button class="btn primary" id="x-pdf">📄 Compartir reporte</button><button class="btn" id="x-pdfdl">Descargar PDF</button></div>
+      <p id="x-pmsg" role="status"></p>
+    </div>
+    <div class="card">
       <h2 class="x-h">Respaldo completo</h2>
       <p class="muted">Incluye <strong>todos los proyectos</strong> de este teléfono: activos (también borradores y exportados), edificios, departamentos y ajustes. Sirve para pasar los datos a otro teléfono o recuperarlos tras reinstalar. Se arma en un solo archivo: con muchas fotos puede requerir bastante memoria.</p>
       <div class="row">
@@ -282,7 +288,7 @@ export async function viewExport($app, h) {
     </div>`;
 
   const $ = (id) => document.getElementById(id);
-  const buttons = ['x-go', 'x-backup', 'x-restore', 'x-del'];
+  const buttons = ['x-go', 'x-backup', 'x-restore', 'x-del', 'x-pdf', 'x-pdfdl'];
   const setBusy = (b) => { busy = b; buttons.forEach((i) => { $(i).disabled = b; }); };
   const say = (id, cls, text) => { const el = $(id); el.className = cls || ''; el.textContent = text; };
 
@@ -381,6 +387,19 @@ export async function viewExport($app, h) {
       await refreshStats().catch(() => {});
     }
   };
+
+  // ---- progress report
+  const pdfBtn = async (download) => {
+    if (busy) return;
+    setBusy(true); say('x-pmsg', 'muted', 'Generando reporte…');
+    try {
+      const { shareReport } = await import('./report.js');
+      const how = await shareReport(h, { download });
+      say('x-pmsg', 'ok', how === 'shared' ? 'Reporte compartido ✓' : how === 'cancelled' ? '' : 'Reporte descargado ✓ (revisa Descargas)');
+    } catch (e) { console.error(e); say('x-pmsg', 'bad', 'No se pudo generar el reporte: ' + (e && e.message ? e.message : e)); } finally { setBusy(false); }
+  };
+  $('x-pdf').onclick = () => pdfBtn(false);
+  $('x-pdfdl').onclick = () => pdfBtn(true);
 
   // ---- backup
   const bprog = (d, t, label) => { $('x-bprog').hidden = false; $('x-bbar').max = Math.max(t, 1); $('x-bbar').value = d; $('x-bptext').textContent = `${label}: activo ${Math.min(d + 1, t)} de ${t}`; };

@@ -251,4 +251,5 @@ details.bsec > :not(summary) { margin-left: 16px; margin-right: 16px; }
 .x-review ul { margin: 6px 0; padding-left: 20px; }
 .x-review a { color: inherit; font-weight: 700; }
 .x-review .muted { color: inherit; opacity: .85; }
+.bpdf { min-height: 40px; padding: 4px 12px; margin-left: 8px; font-size: .9rem; }
 @media (prefers-reduced-motion: reduce) { .btn { transition: none; } }
