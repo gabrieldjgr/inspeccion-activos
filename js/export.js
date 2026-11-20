@@ -1,316 +1,12 @@
-// Export screen: batched ZIP export (brief section 8), delete-exported, full backup / restore.
-// Notes on design:
-//  - A first pass reads only blob sizes (Blob objects are lazy references in IndexedDB) so parts are
-//    planned up front and manifest.json can carry the real total_parts.
-//  - Each part is built with fflate's streaming Zip (STORE for photos/audio, deflate for text) reading ONE
-//    asset at a time; output chunks of the part are kept in memory and turned into a Blob when the part ends.
-//  - IndexedDB rule: inside db.tx() callbacks we only await IndexedDB requests.
-import { Zip, ZipPassThrough, ZipDeflate, unzipSync, strToU8, strFromU8 } from '../vendor/fflate.esm.js';
+// Export screen (v0.3 F4): AI-oriented ZIP export (js/ai-export.js), full backup / restore, delete exported.
+// IndexedDB rule: inside db.tx() callbacks we only await IndexedDB requests.
+import { unzipSync, strFromU8 } from '../vendor/fflate.esm.js';
 import * as db from './db.js';
 import { APP_VERSION } from './version.js';
-import { csvEscape, buildingsToCsv } from './csv.js';
-import { getSavedAssets, getMedia, isPending, deleteAsset, folderName, blobId, nowIso, mediaIndex, countsOf } from './data.js';
-import { projectSlug, createProject } from './projects.js';
-import { FIELDS, DATA_FIELDS, headerFor, measureIn, buildingStatus, projectUnit } from './bldg-schema.js';
-
-const PART_OVERHEAD = 4096; // estimated bytes of JSON/CSV/txt per asset for partition planning
-const CSV_COLUMNS = ['display_id', 'id', 'seq', 'inspector', 'created_at', 'building_code', 'building_name', 'floor', 'department', 'notes', 'n_photos', 'n_audios', 'photo_tags', 'copied_from', 'folder', 'gps_lat', 'gps_lon', 'gps_accuracy_m'];
-
-// ---------------------------------------------------------------- pure helpers (testable in Node)
-
-export const pad2 = (n) => String(n).padStart(2, '0');
-export const fileStamp = (d = new Date()) => `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}`;
-
-const MIME_EXT = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/heic': 'heic', 'image/heif': 'heif', 'audio/webm': 'webm', 'audio/mp4': 'm4a', 'audio/x-m4a': 'm4a', 'audio/ogg': 'ogg', 'audio/mpeg': 'mp3' };
-const extOf = (rec, fallback) => String(rec.ext || MIME_EXT[String(rec.mime_type || '').split(';')[0]] || fallback).replace(/[^\w]/g, '') || fallback;
-
-// File names for the media of one asset. Photos with source 'gallery' + is_screenshot -> captura_NN, others foto_NN.
-// Inputs must already be sorted by `order`. Returns arrays of names aligned with the inputs.
-export function mediaNames(photos, audios) {
-  let f = 0; let c = 0; let a = 0;
-  const num = (n) => String(n).padStart(2, '0');
-  const sfx = (m) => `${m.tag ? '_' + String(m.tag).replace(/[^\w]/g, '') : ''}${m.copied ? '_copia' : ''}`;
-  const photoNames = photos.map((p) => (p.source === 'gallery' && p.is_screenshot ? `captura_${num(++c)}${sfx(p)}.${extOf(p, 'png')}` : `foto_${num(++f)}${sfx(p)}.${extOf(p, 'jpg')}`));
-  const audioNames = audios.map((x) => `audio_${num(++a)}${sfx(x)}.${extOf(x, 'webm')}`);
-  return { photoNames, audioNames };
-}
-
-// activo.json document (brief section 8).
-export function buildAssetDoc(asset, photos, audios, names, exportedAt, deviceId) {
-  return {
-    schema_version: 1,
-    display_id: asset.display_id ?? null,
-    id: asset.id,
-    project_id: asset.project_id ?? null,
-    seq: asset.seq ?? null,
-    inspector: asset.inspector ?? '',
-    device_id: asset.device_id || deviceId || null,
-    app_version: asset.app_version || APP_VERSION,
-    created_at: asset.created_at,
-    updated_at: asset.updated_at,
-    building_id: asset.building_id ?? null,
-    building_code: asset.building_code ?? '',
-    building_name: asset.building_name ?? '',
-    floor: asset.floor ?? '',
-    department: asset.department ?? '',
-    notes: asset.notes ?? '',
-    gps: asset.gps || { lat: null, lon: null, accuracy_m: null },
-    copied_from: asset.copied_from ? asset.copied_from.display_id || asset.copied_from.id : null,
-    previous_display_ids: asset.previous_display_ids || [],
-    moved_from_building_code: asset.moved_from_building_code ?? null,
-    photos: photos.map((p, i) => ({
-      file: names.photoNames[i], source: p.source ?? 'camera', is_screenshot: !!p.is_screenshot,
-      width: p.width ?? null, height: p.height ?? null, bytes: p.bytes ?? p.blob?.size ?? null,
-      resized: !!p.resized, captured_at: p.captured_at ?? null, tag: p.tag ?? null, copied: !!p.copied
-    })),
-    audios: audios.map((x, i) => ({
-      file: names.audioNames[i], mime_type: x.mime_type ?? null, duration_s: x.duration_s ?? null,
-      recorded_at: x.recorded_at ?? null, transcript: x.transcript ?? null, copied: !!x.copied
-    })),
-    exported_at: exportedAt
-  };
-}
-
-// activos.csv text: UTF-8 BOM, CRLF, RFC 4180 quoting (commas, quotes, newlines).
-export function assetsToCsv(docs) {
-  const lines = [CSV_COLUMNS.join(',')];
-  for (const d of docs) {
-    const row = { ...d, n_photos: d.photos.length, n_audios: d.audios.length, photo_tags: d.photos.map((p) => p.tag).filter(Boolean).join(' '), folder: folderName(d), gps_lat: d.gps?.lat ?? '', gps_lon: d.gps?.lon ?? '', gps_accuracy_m: d.gps?.accuracy_m ?? '' };
-    lines.push(CSV_COLUMNS.map((k) => csvEscape(row[k])).join(','));
-  }
-  return '﻿' + lines.join('\r\n') + '\r\n';
-}
-
-// notas.txt content.
-export const notesText = (a) => String(a.notes ?? '').replace(/\r?\n/g, '\r\n') + '\r\n';
-
-// Split items [{id, size}] into consecutive groups whose summed size stays <= limit.
-// A single item bigger than the limit goes alone in its own group. Order is preserved.
-export function partitionBySize(items, limit) {
-  const parts = [];
-  let cur = []; let sum = 0;
-  for (const it of items) {
-    if (cur.length && sum + it.size > limit) { parts.push(cur); cur = []; sum = 0; }
-    cur.push(it); sum += it.size;
-  }
-  if (cur.length) parts.push(cur);
-  return parts;
-}
-
-// Scope filter. scope: { type:'pending'|'all'|'building'|'dates', building_code, from, to } (from/to 'YYYY-MM-DD')
-export function filterAssets(assets, scope) {
-  return assets.filter((a) => {
-    if (a.status !== 'saved') return false;
-    switch (scope.type) {
-      case 'pending': return isPending(a);
-      case 'building': return a.building_code === scope.building_code;
-      case 'dates': {
-        const d = String(a.created_at || '').slice(0, 10);
-        return (!scope.from || d >= scope.from) && (!scope.to || d <= scope.to);
-      }
-      default: return true;
-    }
-  });
-}
-
-export const partFileName = (project, device8, stamp, n) => `inspeccion_${project}_${device8}_${stamp}_parte${n}.zip`;
-
-// Streaming zip writer around fflate. Chunks are accumulated; finish() returns them.
-export function createZipWriter() {
-  const chunks = [];
-  let size = 0;
-  let settle;
-  const finished = new Promise((resolve, reject) => { settle = { resolve, reject }; });
-  finished.catch(() => {});
-  const zip = new Zip((err, chunk, final) => {
-    if (err) { settle.reject(err); return; }
-    chunks.push(chunk); size += chunk.length;
-    if (final) settle.resolve();
-  });
-  return {
-    get size() { return size; },
-    addStored(name, u8) { const f = new ZipPassThrough(name); zip.add(f); f.push(u8, true); },
-    addText(name, text) { const f = new ZipDeflate(name, { level: 6 }); zip.add(f); f.push(strToU8(text), true); },
-    async finish() { zip.end(); await finished; return chunks; }
-  };
-}
-
-const isMemoryError = (e) => !!e && (e instanceof RangeError || e.name === 'QuotaExceededError' || /memory|allocation|quota/i.test(String(e.message || '')));
-
-// ---------------------------------------------------------------- IndexedDB helpers
-
-const wrapReq = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
-
-// Mark exported_at WITHOUT touching updated_at. Skips assets edited after the snapshot we exported.
-async function markExported(entries, exportedAt) {
-  // entries: [{id, updated_at}] (updated_at = value of the record when read for export)
-  await db.tx('assets', 'readwrite', (s) => new Promise((resolve, reject) => {
-    let left = entries.length;
-    if (!left) { resolve(); return; }
-    for (const e of entries) {
-      const g = s.get(e.id);
-      g.onsuccess = () => {
-        const r = g.result;
-        if (r && r.updated_at === e.updated_at) s.put({ ...r, exported_at: exportedAt });
-        if (--left === 0) resolve();
-      };
-      g.onerror = () => reject(g.error);
-    }
-  }));
-}
-
-// ---------------------------------------------------------------- buildings in the export
-
-// Field value as it goes to the Excel-shaped outputs: measures in project units, % as a fraction (1 = 100 %)
-// like the Excel column AA, lists/text as typed.
-export function excelValue(f, b, units) {
-  if (f.key === 'code') return b.code;
-  if (f.key === 'name') return b.name;
-  const v = b.fields?.[f.key];
-  if (v == null || v === '') return null;
-  if (f.type === 'area' || f.type === 'length') return measureIn(v, f.type, units);
-  if (f.type === 'percent') return Math.round((Number(v) / 100) * 10000) / 10000;
-  return v;
-}
-const BUILDING_EXTRA = ['building_id', 'status', 'inspected_at', 'n_photos', 'n_audios', 'n_assets', 'source', 'notes'];
-// edificios.csv: the 33 Excel columns (same order and headers, units of the project) + app columns.
-export function buildingsFullCsv(rows, units) {
-  const head = [...FIELDS.map((f) => headerFor(f, units).replace(/\n/g, ' ')), ...BUILDING_EXTRA];
-  const lines = [head.map(csvEscape).join(',')];
-  for (const r of rows) {
-    lines.push([...FIELDS.map((f) => csvEscape(excelValue(f, r.b, units) ?? '')), r.b.id, r.status, r.b.inspected_at || '', r.photos, r.audios, r.assets, r.b.source || '', csvEscape(r.b.notes || '')].join(','));
-  }
-  return '\uFEFF' + lines.join('\r\n') + '\r\n';
-}
-export function buildBuildingDoc(b, { photos, audios, names, units, status, nAssets, exportedAt }) {
-  const fields = {};
-  const measures = {};
-  for (const f of DATA_FIELDS) {
-    fields[f.key] = excelValue(f, b, units);
-    const v = b.fields?.[f.key];
-    if ((f.type === 'area' || f.type === 'length') && v) measures[f.key] = { value: v.value, unit: v.unit, expression: v.expr || null, value_in_project_units: measureIn(v, f.type, units), project_unit: projectUnit(f.type, units) };
-  }
-  return {
-    schema_version: 1, id: b.id, project_id: b.project_id, code: b.code, name: b.name, status, inspected_at: b.inspected_at || null,
-    source: b.source || null, created_by: b.created_by || null, updated_at: b.updated_at || null, field_updated_at: b.field_updated_at || null,
-    units, fields, measures, notes: b.notes || '', n_assets: nAssets,
-    photos: photos.map((p, i) => ({ file: names.photoNames[i], width: p.width ?? null, height: p.height ?? null, captured_at: p.captured_at ?? null, tag: p.tag ?? null })),
-    audios: audios.map((x, i) => ({ file: names.audioNames[i], mime_type: x.mime_type ?? null, duration_s: x.duration_s ?? null, recorded_at: x.recorded_at ?? null })),
-    exported_at: exportedAt
-  };
-}
-const buildingHasContent = (b, c) => !!(c.photo || c.audio || String(b.notes || '').trim() || (b.fields && Object.keys(b.fields).length) || b.inspected_at);
-const buildingPending = (b) => !b.exported_at || String(b.updated_at || '') > String(b.exported_at);
-async function markBuildingsExported(entries, exportedAt) {
-  await db.tx('buildings', 'readwrite', (s) => new Promise((resolve, reject) => {
-    let left = entries.length;
-    if (!left) { resolve(); return; }
-    for (const e of entries) {
-      const g = s.get(e.id);
-      g.onsuccess = () => { const r = g.result; if (r && r.updated_at === e.updated_at) s.put({ ...r, exported_at: exportedAt }); if (--left === 0) resolve(); };
-      g.onerror = () => reject(g.error);
-    }
-  }));
-}
-const safeDir = (s) => String(s || 'SIN-CODIGO').trim().replace(/[^\w.-]+/g, '-');
-
-async function readBlobBytes(rec) { return new Uint8Array(await rec.blob.arrayBuffer()); }
-
-async function sizesOf(asset) {
-  const [ph, au] = await Promise.all([getMedia(asset.id, 'photo'), getMedia(asset.id, 'audio')]); // asset or building id
-  let size = PART_OVERHEAD;
-  for (const m of ph) size += m.blob?.size || 0;
-  for (const m of au) size += m.blob?.size || 0;
-  return size;
-}
-
-// ---------------------------------------------------------------- ZIP export
-
-// opts: { scope, maxPartBytes, onProgress(done,total,label), onPart({n, total, name, blob, nAssets}) }
-export async function exportZip(h, opts) {
-  const { scope, maxPartBytes, onProgress, onPart } = opts;
-  const project = h.state.project;
-  const all = await getSavedAssets(project.id);
-  const assets = filterAssets(all, scope).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)) || (a.seq ?? 0) - (b.seq ?? 0));
-  const units = project.units || 'imperial';
-  const [inspector, buildings, media] = await Promise.all([db.getSetting('inspector', ''), db.getByProject('buildings', project.id), mediaIndex()]);
-  buildings.sort((a, b) => a.code.localeCompare(b.code, 'es', { numeric: true }));
-  const nAssetsOf = (b) => all.filter((a) => a.building_id === b.id || (!a.building_id && db.normKey(a.building_code) === b.code_key)).length;
-  const bRows = buildings.map((b) => { const c = countsOf(media, b.id); return { b, c, status: buildingStatus(b, c), photos: c.photo, audios: c.audio, assets: nAssetsOf(b) }; });
-  // Buildings with field data/media go in the ZIP (folder per building) according to the same scope.
-  const bInScope = bRows.filter((r) => buildingHasContent(r.b, r.c) && (
-    scope.type === 'all' || (scope.type === 'pending' && buildingPending(r.b)) || (scope.type === 'building' && r.b.code === scope.building_code)
-    || (scope.type === 'dates' && (() => { const d = String(r.b.updated_at || '').slice(0, 10); return (!scope.from || d >= scope.from) && (!scope.to || d <= scope.to); })())));
-  if (!assets.length && !bInScope.length) return { parts: 0, assets: 0, buildings: 0 };
-
-  const total = assets.length + bInScope.length;
-  const items = [];
-  for (let i = 0; i < bInScope.length; i++) { onProgress?.(i, total, 'Calculando tamaños…'); items.push({ building: bInScope[i], size: await sizesOf(bInScope[i].b) }); }
-  for (let i = 0; i < assets.length; i++) {
-    onProgress?.(bInScope.length + i, total, 'Calculando tamaños…');
-    items.push({ asset: assets[i], size: await sizesOf(assets[i]) });
-  }
-  const groups = partitionBySize(items, maxPartBytes);
-  const totalParts = groups.length;
-  const buildingsCsv = buildingsFullCsv(bRows, units);
-  const device8 = String(h.state.deviceId || 'sin-id').slice(0, 8);
-  const startedAt = new Date();
-  const stamp = fileStamp(startedAt);
-  const exportedAt = nowIso(startedAt);
-  let done = 0;
-
-  for (let p = 0; p < totalParts; p++) {
-    const group = groups[p];
-    const w = createZipWriter();
-    const docs = [];
-    const marks = [];
-    w.addText('manifest.json', JSON.stringify({
-      schema_version: 1, app_version: APP_VERSION, device_id: h.state.deviceId, inspector, exported_at: exportedAt,
-      project: { id: project.id, name: project.name, client: project.client, site: project.site, units: project.units }, valuer_code: project.valuer_code || null,
-      part: p + 1, total_parts: totalParts, n_assets: group.filter((x) => x.asset).length, n_buildings: group.filter((x) => x.building).length, filter: scope
-    }, null, 2));
-    w.addText('edificios.csv', buildingsCsv);
-    const bMarks = [];
-    for (const { building: r } of group.filter((x) => x.building)) {
-      onProgress?.(done, total, `Parte ${p + 1} de ${totalParts}`);
-      const [photos, audios] = await Promise.all([getMedia(r.b.id, 'photo'), getMedia(r.b.id, 'audio')]);
-      const names = mediaNames(photos, audios);
-      const dir = `edificios/${safeDir(r.b.code)}/`;
-      w.addText(dir + 'edificio.json', JSON.stringify(buildBuildingDoc(r.b, { photos, audios, names, units, status: r.status, nAssets: r.assets, exportedAt }), null, 2));
-      w.addText(dir + 'notas.txt', notesText(r.b));
-      for (let i = 0; i < photos.length; i++) w.addStored(dir + names.photoNames[i], await readBlobBytes(photos[i]));
-      for (let i = 0; i < audios.length; i++) w.addStored(dir + names.audioNames[i], await readBlobBytes(audios[i]));
-      bMarks.push({ id: r.b.id, updated_at: r.b.updated_at });
-      done++;
-    }
-    for (const { asset } of group.filter((x) => x.asset)) {
-      onProgress?.(done, total, `Parte ${p + 1} de ${totalParts}`);
-      const [photos, audios] = await Promise.all([getMedia(asset.id, 'photo'), getMedia(asset.id, 'audio')]);
-      const names = mediaNames(photos, audios);
-      const doc = buildAssetDoc(asset, photos, audios, names, exportedAt, h.state.deviceId);
-      const dir = `activos/${folderName(asset)}/`;
-      w.addText(dir + 'activo.json', JSON.stringify(doc, null, 2));
-      w.addText(dir + 'notas.txt', notesText(asset));
-      for (let i = 0; i < photos.length; i++) w.addStored(dir + names.photoNames[i], await readBlobBytes(photos[i]));
-      for (let i = 0; i < audios.length; i++) w.addStored(dir + names.audioNames[i], await readBlobBytes(audios[i]));
-      docs.push(doc);
-      marks.push({ id: asset.id, updated_at: asset.updated_at });
-      done++;
-      onProgress?.(done, total, `Parte ${p + 1} de ${totalParts}`);
-    }
-    w.addText('activos.csv', assetsToCsv(docs));
-    w.addText('activos.json', JSON.stringify(docs, null, 2));
-    const chunks = await w.finish();
-    const blob = new Blob(chunks, { type: 'application/zip' });
-    chunks.length = 0;
-    // Only after the part was generated successfully: mark as exported (updated_at untouched).
-    await markExported(marks, exportedAt);
-    await markBuildingsExported(bMarks, exportedAt);
-    onPart?.({ n: p + 1, total: totalParts, name: partFileName(projectSlug(project), device8, stamp, p + 1), blob, nAssets: marks.length, nBuildings: bMarks.length });
-    await new Promise((r) => setTimeout(r)); // let the UI breathe between parts
-  }
-  return { parts: totalParts, assets: assets.length, buildings: bInScope.length };
-}
+import { getSavedAssets, getMedia, isPending, deleteAsset, blobId, nowIso } from './data.js';
+import { createProject } from './projects.js';
+import { createZipWriter, fileStamp, extOf, readBlobBytes, isMemoryError } from './ziputil.js';
+import { exportForAI, reviewExport, filterAssets } from './ai-export.js';
 
 // ---------------------------------------------------------------- full backup
 // schema_version 1: DB v1 (app <= 0.2; also produced by the pre-migration backup, so v0.2 can restore it).
@@ -532,11 +228,12 @@ export async function viewExport($app, h) {
       ${nDrafts ? `<p class="muted">${nDrafts} borrador${nDrafts === 1 ? '' : 'es'} sin guardar no se exportan en el ZIP (sí van en el respaldo completo).</p>` : ''}
     </div>
     <div class="card">
-      <h2 class="x-h">Exportar a ZIP</h2>
+      <h2 class="x-h">Exportar para procesar con IA</h2>
+      <p class="muted small">ZIP ordenado por edificio → activo, con índice (JSON y CSV) e instrucciones para la IA (README_IA.md) dentro.</p>
       <label for="x-scope">Alcance</label>
       <select id="x-scope">
-        <option value="pending">Solo pendientes (no exportados o editados)</option>
-        <option value="all">Todos</option>
+        <option value="pending">Solo lo nuevo o editado (incremental)</option>
+        <option value="all">Todo el proyecto (completo)</option>
         <option value="building">Un edificio</option>
         <option value="dates">Rango de fechas</option>
       </select>
@@ -549,8 +246,14 @@ export async function viewExport($app, h) {
         <div class="x-field"><label for="x-to">Hasta</label><input id="x-to" type="date" max="${today}" value="${today}"></div>
       </div>
       <label for="x-max">Tamaño máximo por parte</label>
-      <select id="x-max"><option value="200">200 MB</option><option value="500" selected>500 MB</option></select>
+      <select id="x-max">
+        <option value="20">20 MB — correo (Outlook, Gmail)</option>
+        <option value="200">200 MB</option>
+        <option value="500" selected>500 MB</option>
+        <option value="1024">1 GB — WhatsApp, Teams, Drive</option>
+      </select>
       <p id="x-count" class="muted" role="status"></p>
+      <div id="x-review" class="x-review" hidden></div>
       <div class="row"><button class="btn primary big" id="x-go">Exportar ZIP</button></div>
       <div id="x-prog" class="x-prog" hidden>
         <progress id="x-bar" value="0" max="1"></progress>
@@ -596,11 +299,23 @@ export async function viewExport($app, h) {
     if (type === 'dates') { sc.from = $('x-from').value || null; sc.to = $('x-to').value || null; }
     return sc;
   };
+  let reviewToken = 0;
   async function updateCount() {
+    const token = ++reviewToken;
     try {
-      const n = filterAssets(await getSavedAssets(pid), currentScope()).length;
-      $('x-count').textContent = `Se exportarán ${n} activo${n === 1 ? '' : 's'}.`;
-    } catch (_) { /* ignore */ }
+      const r = await reviewExport(h.state.project, currentScope());
+      if (token !== reviewToken) return;
+      $('x-count').textContent = `Se exportarán ${r.assets} activo${r.assets === 1 ? '' : 's'} y ${r.buildings} edificio${r.buildings === 1 ? '' : 's'} con datos de campo.`;
+      const items = [];
+      if (r.noPhoto) items.push(`<li><a href="#/?f=nophoto">${r.noPhoto} activo${r.noPhoto === 1 ? '' : 's'} sin foto</a></li>`);
+      if (r.noNote) items.push(`<li><a href="#/?f=nonote">${r.noNote} sin nota (ni texto ni voz)</a></li>`);
+      if (r.noPlate) items.push(`<li>${r.noPlate} con fotos pero ninguna marcada como <strong>placa</strong></li>`);
+      if (r.bNoPhoto) items.push(`<li><a href="#/edificios">${r.bNoPhoto} edificio${r.bNoPhoto === 1 ? '' : 's'} sin foto</a></li>`);
+      if (r.bNotInspected) items.push(`<li><a href="#/edificios">${r.bNotInspected} edificio${r.bNotInspected === 1 ? '' : 's'} sin marcar como inspeccionado${r.bNotInspected === 1 ? '' : 's'}</a></li>`);
+      const box = $('x-review');
+      box.hidden = !items.length;
+      box.innerHTML = items.length ? `<strong>Antes de exportar, revisa:</strong><ul>${items.join('')}</ul><p class="muted small">No impide exportar; la IA recibirá estos avisos en cada registro.</p>` : '';
+    } catch (e) { console.error(e); }
   }
   const onScope = () => {
     const t = $('x-scope').value;
@@ -622,6 +337,12 @@ export async function viewExport($app, h) {
         try { await navigator.share({ files: [new File([blob], name, { type: 'application/zip' })], title: name }); } catch (e) { if (e && e.name !== 'AbortError') reportError(e); }
       };
       li.append(sh);
+    } else if (!ul.parentElement.querySelector('.x-sharehelp')) {
+      // Android Chrome cannot share .zip files from a web app: explain the two-step path once.
+      const p = document.createElement('p');
+      p.className = 'muted small x-sharehelp';
+      p.innerHTML = 'Este teléfono no permite compartir ZIP directo desde la app. Toca <strong>Descargar</strong> y luego, en WhatsApp, Teams u Outlook: <strong>Adjuntar → Documento → Descargas</strong>. En Drive: <strong>+ → Subir</strong>.';
+      ul.after(p);
     }
     ul.append(li);
   };
@@ -642,12 +363,12 @@ export async function viewExport($app, h) {
     const bar = $('x-bar');
     let nParts = 0;
     try {
-      const r = await exportZip(h, {
+      const r = await exportForAI(h, {
         scope, maxPartBytes: Number($('x-max').value) * 1048576,
-        onProgress: (d, t, label) => { bar.max = t; bar.value = d; $('x-ptext').textContent = d >= t ? `Activo ${t} de ${t}` : `Activo ${Math.min(d + 1, t)} de ${t} · ${label}`; },
+        onProgress: (d, t, label) => { bar.max = t; bar.value = d; $('x-ptext').textContent = d >= t ? `Registro ${t} de ${t}` : `Registro ${Math.min(d + 1, t)} de ${t} · ${label}`; },
         onPart: (p) => { nParts++; addPartRow($('x-parts'), p.name, p.blob, `${p.nAssets} activo${p.nAssets === 1 ? '' : 's'}${p.nBuildings ? ` + ${p.nBuildings} edificio${p.nBuildings === 1 ? '' : 's'}` : ''} · parte ${p.n} de ${p.total}`); }
       });
-      if (!r.assets && !r.buildings) say('x-msg', 'muted', 'No hay activos ni edificios que coincidan con el alcance elegido.');
+      if (!r.parts) say('x-msg', 'muted', 'No hay activos ni edificios que coincidan con el alcance elegido.');
       else {
         bar.value = bar.max;
         say('x-msg', 'ok', `Listo: ${r.assets} activo${r.assets === 1 ? '' : 's'}${r.buildings ? ` y ${r.buildings} edificio${r.buildings === 1 ? '' : 's'}` : ''} en ${r.parts} parte${r.parts === 1 ? '' : 's'}. Descarga o comparte cada parte (se marcaron como exportados).`);
