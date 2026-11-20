@@ -3,7 +3,13 @@
 import * as db from './db.js';
 import { nowIso, blobId, getMedia, deleteMedia } from './data.js';
 
-const MAX_SIDE_ALTA = 2560;
+// 'alta': long side 3072 px, JPEG 0.88 (~1.2-2 MB). Plates ('placa'): original JPEG kept untouched; other
+// formats re-encoded at up to 4096 px (iOS canvas limit ~16.7 MP), JPEG 0.92.
+const MAX_SIDE_ALTA = 3072;
+const Q_ALTA = 0.88;
+const MAX_SIDE_HQ = 4096;
+const Q_HQ = 0.92;
+export const PHOTO_TAGS = { general: 'General', placa: 'Placa', detalle: 'Detalle' };
 const THUMB_SIDE = 300;
 const MAX_SCALE = 8;
 
@@ -67,8 +73,23 @@ function fitSize(w, h, maxSide) {
   return { w: Math.max(1, Math.round(w * k)), h: Math.max(1, Math.round(h * k)) };
 }
 
+// Pure: how to store an image. Returns { reencode:boolean, maxSide, q }.
+// Everything ends as JPEG except PNG screenshots (text stays sharp) and untouched originals.
+export function encodePlan({ mime, width, height, quality, tag, isShot }) {
+  const side = Math.max(width, height);
+  const isJpeg = mime === 'image/jpeg' || mime === 'image/jpg';
+  const keepable = isJpeg || (mime === 'image/png' && isShot);
+  if (tag === 'placa' || quality === 'original') {
+    if (keepable) return { reencode: false };
+    return { reencode: true, maxSide: Math.min(side, MAX_SIDE_HQ), q: Q_HQ };
+  }
+  if (keepable && side <= MAX_SIDE_ALTA) return { reencode: false };
+  if (mime === 'image/png' && isShot) return { reencode: false };
+  return { reencode: true, maxSide: Math.min(side, MAX_SIDE_ALTA), q: Q_ALTA };
+}
+
 // Returns the two records ready to be written. Does not touch IndexedDB.
-async function buildRecords(file, assetId, source, quality) {
+async function buildRecords(file, assetId, source, quality, tag = null) {
   if (file.type && !file.type.startsWith('image/')) {
     const e = new Error('not-image'); e.code = 'not-image'; throw e;
   }
@@ -76,17 +97,20 @@ async function buildRecords(file, assetId, source, quality) {
   try { bitmap = await decode(file); } catch (e) { const x = new Error('decode'); x.code = 'decode'; x.cause = e; throw x; }
   try {
     let blob = file, width = bitmap.width, height = bitmap.height, resized = false;
-    let mime = file.type || MIME_EXT[extFor(file)] || 'image/jpeg', ext = extFor(file);
-    if (quality === 'alta' && Math.max(width, height) > MAX_SIDE_ALTA) {
-      const s = fitSize(width, height, MAX_SIDE_ALTA);
-      blob = await renderJpeg(bitmap, s.w, s.h, 0.90);
-      width = s.w; height = s.h; resized = true; mime = 'image/jpeg'; ext = 'jpg';
-    }
+    let mime = (file.type || '').toLowerCase() || MIME_EXT[extFor(file)] || 'image/jpeg', ext = extFor(file);
+    const name = file.name || '';
+    const isShot = source === 'gallery' && (/screenshot|captura|screen/i.test(name) || file.type === 'image/png');
+    const plan = encodePlan({ mime, width, height, quality, tag, isShot });
+    if (plan.reencode) {
+      const s = Math.max(width, height) > plan.maxSide ? fitSize(width, height, plan.maxSide) : { w: width, h: height };
+      blob = await renderJpeg(bitmap, s.w, s.h, plan.q);
+      resized = s.w !== width || s.h !== height;
+      width = s.w; height = s.h; mime = 'image/jpeg'; ext = 'jpg';
+    } else if (mime === 'image/jpg') { mime = 'image/jpeg'; }
+    if (mime === 'image/jpeg') ext = 'jpg';
     const ts = Math.max(width, height) > THUMB_SIDE ? fitSize(width, height, THUMB_SIDE) : { w: width, h: height };
     const thumbBlob = await renderJpeg(bitmap, ts.w, ts.h, 0.7);
 
-    const name = file.name || '';
-    const isShot = source === 'gallery' && (/screenshot|captura|screen/i.test(name) || file.type === 'image/png');
     const captured = file.lastModified ? nowIso(new Date(file.lastModified)) : nowIso();
     const uid = crypto.randomUUID();
     const order = Date.now();
@@ -94,7 +118,7 @@ async function buildRecords(file, assetId, source, quality) {
       uid,
       photo: {
         id: blobId('photo', assetId, uid), asset_id: assetId, kind: 'photo', uid, blob, mime_type: mime, ext,
-        source, is_screenshot: isShot, width, height, bytes: blob.size, resized, captured_at: captured, order
+        source, is_screenshot: isShot, width, height, bytes: blob.size, resized, captured_at: captured, order, tag: tag || null
       },
       // `order` on the thumb is an additive field so the grid can sort thumbs without loading photo records.
       thumb: { id: blobId('thumb', assetId, uid), asset_id: assetId, kind: 'thumb', uid, blob: thumbBlob, mime_type: 'image/jpeg', order }
@@ -117,7 +141,7 @@ function errorMessage(err, name) {
 
 // ---- Public API ----
 
-export async function mountPhotos(el, asset, { quality = 'alta' } = {}) {
+export async function mountPhotos(el, asset, { quality = 'alta', cameraMode = 'sistema' } = {}) {
   const assetId = asset.id;
   let destroyed = false;
   let items = [];          // [{uid, order, url}]
@@ -129,9 +153,15 @@ export async function mountPhotos(el, asset, { quality = 'alta' } = {}) {
   const root = h('div', { class: 'ph-root' });
   const camInput = h('input', { type: 'file', accept: 'image/*', capture: 'environment', class: 'sr', id: `ph-cam-${assetId}`, 'aria-label': 'Tomar foto' });
   const galInput = h('input', { type: 'file', accept: 'image/*', multiple: '', class: 'sr', id: `ph-gal-${assetId}`, 'aria-label': 'Agregar fotos de galería' });
-  const btnCam = h('button', { type: 'button', class: 'btn primary', text: 'Tomar foto', onclick: () => camInput.click() });
-  const btnGal = h('button', { type: 'button', class: 'btn', text: 'Agregar de galería', onclick: () => galInput.click() });
-  const actions = h('div', { class: 'row ph-actions' }, btnCam, btnGal, camInput, galInput);
+  let pendingTag = null; // tag for the photo coming back from the system camera
+  const systemCamera = (tag) => { pendingTag = tag; camInput.click(); };
+  const shoot = (tag) => (cameraMode === 'rapida' ? quickCamera(tag) : systemCamera(tag));
+  const btnCam = h('button', { type: 'button', class: 'btn primary ph-big', onclick: () => shoot(null) }, h('span', { class: 'ph-ico', text: '📷' }), h('span', { text: 'Foto' }));
+  const btnPlate = h('button', { type: 'button', class: 'btn ph-big ph-plate', onclick: () => shoot('placa') }, h('span', { class: 'ph-ico', text: '🔎' }), h('span', { text: 'Placa' }));
+  const btnGal = h('button', { type: 'button', class: 'btn ph-small', text: '🖼 Galería', onclick: () => galInput.click() });
+  const btnSys = h('button', { type: 'button', class: 'btn ph-small', text: 'Cámara del sistema', onclick: () => systemCamera(null) });
+  btnSys.hidden = cameraMode !== 'rapida';
+  const actions = h('div', { class: 'ph-actions' }, h('div', { class: 'ph-bigrow' }, btnCam, btnPlate), h('div', { class: 'row ph-smallrow' }, btnGal, btnSys), camInput, galInput);
   const countEl = h('p', { class: 'muted ph-count', 'aria-live': 'polite' });
   const statusEl = h('p', { class: 'ph-status', role: 'status', 'aria-live': 'polite' });
   statusEl.hidden = true;
@@ -154,6 +184,12 @@ export async function mountPhotos(el, asset, { quality = 'alta' } = {}) {
   const btnReset = h('button', { type: 'button', class: 'btn ph-vbtn', text: '1:1', 'aria-label': 'Restablecer zoom' });
   const btnDel = h('button', { type: 'button', class: 'btn danger ph-vbtn', text: 'Borrar' });
   const bottom = h('div', { class: 'ph-vbar ph-vbottom' }, btnPrev, btnZoomOut, btnReset, btnZoomIn, btnNext, btnDel);
+  const tagBar = h('div', { class: 'ph-tagbar', role: 'group', 'aria-label': 'Tipo de foto' });
+  const tagBtns = {};
+  for (const [k, label] of [...Object.entries(PHOTO_TAGS), ['', 'Sin tipo']]) {
+    tagBtns[k] = h('button', { type: 'button', class: 'btn ph-vbtn ph-tag', text: label, onclick: () => setTag(k || null) });
+    tagBar.append(tagBtns[k]);
+  }
   const vMsg = h('p', { class: 'ph-vmsg', role: 'status' });
   vMsg.hidden = true;
   const confirmBox = h('div', { class: 'ph-confirm', role: 'alertdialog', 'aria-label': 'Confirmar borrado' });
@@ -161,7 +197,7 @@ export async function mountPhotos(el, asset, { quality = 'alta' } = {}) {
   const btnConfirmNo = h('button', { type: 'button', class: 'btn', text: 'Cancelar' });
   confirmBox.append(h('p', { text: '¿Borrar esta foto? No se puede deshacer.' }), h('div', { class: 'row' }, btnConfirmNo, btnConfirmYes));
   confirmBox.hidden = true;
-  dlg.append(top, stage, vMsg, bottom, confirmBox);
+  dlg.append(top, stage, vMsg, tagBar, bottom, confirmBox);
   root.append(dlg);
   el.append(root);
 
@@ -264,6 +300,18 @@ export async function mountPhotos(el, asset, { quality = 'alta' } = {}) {
   btnZoomOut.addEventListener('click', () => zoomAt(scale / 1.5));
   btnReset.addEventListener('click', resetZoom);
 
+  function paintTag(tag) { for (const [k, b] of Object.entries(tagBtns)) b.classList.toggle('on', (tag || '') === k); }
+  async function setTag(tag) {
+    const it = items[curIndex];
+    if (!it) return;
+    try {
+      const id = blobId('photo', assetId, it.uid);
+      const rec = await db.get('blobs', id);
+      if (!rec || destroyed) return;
+      await db.tx('blobs', 'readwrite', (st) => { st.put({ ...rec, tag }); }); // blob record only, never the asset
+      it.tag = tag; paintTag(tag); renderGrid(); onChange();
+    } catch (e) { setVMsg('No se pudo cambiar el tipo: ' + (e.message || e.name)); }
+  }
   function hideConfirm() { confirmBox.hidden = true; }
   function setVMsg(text) { vMsg.textContent = text || ''; vMsg.hidden = !text; }
 
@@ -279,6 +327,7 @@ export async function mountPhotos(el, asset, { quality = 'alta' } = {}) {
     btnNext.disabled = i === items.length - 1;
     // Show the thumbnail instantly while the full image loads.
     img.src = it.url;
+    paintTag(it.tag);
     try {
       const rec = await db.get('blobs', blobId('photo', assetId, it.uid));
       if (destroyed || token !== loadToken) return;
@@ -287,7 +336,8 @@ export async function mountPhotos(el, asset, { quality = 'alta' } = {}) {
       fullUrl = URL.createObjectURL(rec.blob);
       img.src = fullUrl;
       if (old) URL.revokeObjectURL(old);
-      vTitle.textContent = `Foto ${i + 1} de ${items.length} · ${rec.width}×${rec.height} · ${fmtBytes(rec.bytes || rec.blob.size)}`;
+      vTitle.textContent = `Foto ${i + 1} de ${items.length} · ${rec.width}×${rec.height} · ${fmtBytes(rec.bytes || rec.blob.size)}${rec.copied ? ' · copiada' : ''}`;
+      it.tag = rec.tag || null; paintTag(it.tag);
     } catch (e) {
       if (!destroyed && token === loadToken) setVMsg('No se pudo cargar la foto grande: ' + (e.message || e.name));
     }
@@ -339,21 +389,39 @@ export async function mountPhotos(el, asset, { quality = 'alta' } = {}) {
       const b = h('button', { type: 'button', class: 'ph-thumb', 'aria-label': `Abrir foto ${i + 1} de ${items.length}`, onclick: () => openViewer(i) });
       const im = h('img', { src: it.url, alt: `Foto ${i + 1}`, loading: 'lazy', draggable: 'false' });
       b.append(im, h('span', { class: 'ph-num', text: String(i + 1) }));
+      if (it.tag) b.append(h('span', { class: 'ph-tagb ph-tag-' + it.tag, text: PHOTO_TAGS[it.tag] || it.tag }));
       grid.append(b);
     });
-    countEl.textContent = items.length === 0 ? 'Sin fotos todavía.' : items.length === 1 ? '1 foto' : `${items.length} fotos`;
+    countEl.textContent = '';
+    countEl.append(h('span', { text: items.length === 0 ? 'Sin fotos todavía.' : items.length === 1 ? '1 foto' : `${items.length} fotos` }));
+    // Suggested shots (never mandatory): ticks as tags are present.
+    const have = new Set(items.map((x) => x.tag).filter(Boolean));
+    const sug = h('span', { class: 'ph-sug' }, h('span', { text: 'Sugeridas:' }));
+    for (const [k, label] of Object.entries(PHOTO_TAGS)) sug.append(h('span', { class: 'ph-sugi' + (have.has(k) ? ' on' : ''), text: (have.has(k) ? '✓ ' : '○ ') + label }));
+    countEl.append(sug);
   }
 
+  // Tags live on photo records; read them with a cursor that skips nothing but holds one record at a time.
+  async function photoTags() {
+    const out = new Map();
+    try {
+      for (const p of await getMedia(assetId, 'photo')) out.set(p.uid, p.tag || null);
+    } catch (_) { /* tags are cosmetic here */ }
+    return out;
+  }
   async function refresh() {
     let recs;
     try { recs = await getMedia(assetId, 'thumb'); }
     catch (e) { addError('No se pudieron leer las fotos guardadas: ' + (e.message || e.name)); return; }
     if (destroyed) return;
     const old = items;
-    items = recs.map((r) => ({ uid: r.uid, order: r.order ?? 0, url: URL.createObjectURL(r.blob) }));
+    const tags = await photoTags();
+    if (destroyed) return;
+    items = recs.map((r) => ({ uid: r.uid, order: r.order ?? 0, url: URL.createObjectURL(r.blob), tag: tags.get(r.uid) || null }));
     items.sort((a, b) => a.order - b.order);
     renderGrid();
     for (const it of old) URL.revokeObjectURL(it.url);
+    onChange();
   }
 
   // ---- Errors / status ----
@@ -372,9 +440,9 @@ export async function mountPhotos(el, asset, { quality = 'alta' } = {}) {
   }
 
   // ---- Intake queue (strictly sequential) ----
-  async function processOne(file, source) {
+  async function processOne(file, source, tag) {
     try {
-      const { photo, thumb } = await buildRecords(file, assetId, source, quality);
+      const { photo, thumb } = await buildRecords(file, assetId, source, quality, tag);
       if (destroyed) return;
       // The IDB transaction only issues requests; every await on other APIs happened above.
       await db.tx('blobs', 'readwrite', (s) => { s.put(photo); s.put(thumb); });
@@ -382,7 +450,7 @@ export async function mountPhotos(el, asset, { quality = 'alta' } = {}) {
       addError(errorMessage(e, file.name));
     }
   }
-  function enqueue(files, source) {
+  function enqueue(files, source, tag = null) {
     if (!files.length) return;
     batchTotal += files.length;
     for (const f of files) {
@@ -390,7 +458,7 @@ export async function mountPhotos(el, asset, { quality = 'alta' } = {}) {
         if (destroyed) return;
         batchDone++;
         renderStatus(batchDone);
-        await processOne(f, source);
+        await processOne(f, source, tag);
         await refresh();
       }).catch((e) => addError(errorMessage(e, f.name)));
     }
@@ -402,16 +470,32 @@ export async function mountPhotos(el, asset, { quality = 'alta' } = {}) {
     return (e) => {
       const files = Array.from(e.target.files || []);
       e.target.value = '';
-      enqueue(files, source);
+      const tag = source === 'camera' ? pendingTag : null;
+      pendingTag = null;
+      enqueue(files, source, tag);
     };
+  }
+  async function quickCamera(tag) {
+    try {
+      const { openQuickCamera } = await import('./camera.js');
+      await openQuickCamera({ tag, onShot: (file, t) => enqueue([file], 'camera', t) });
+    } catch (e) {
+      addError((e && e.message ? e.message : 'No se pudo abrir la cámara rápida.') + ' Se abrirá la cámara del sistema.');
+      systemCamera(tag);
+    }
   }
   camInput.addEventListener('change', onPick('camera'));
   galInput.addEventListener('change', onPick('gallery'));
+
+  const listeners = [];
+  function onChange() { const n = items.length; listeners.forEach((fn) => { try { fn(n); } catch (_) { /* ignore */ } }); }
 
   await refresh();
   if (!items.length) renderGrid();
 
   return {
+    onChange(fn) { listeners.push(fn); fn(items.length); },
+    get count() { return items.length; },
     destroy() {
       destroyed = true;
       try { if (dlg.open) dlg.close(); } catch (_) { /* noop */ }

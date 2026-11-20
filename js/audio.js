@@ -4,7 +4,10 @@ import * as db from './db.js';
 import { blobId, getMedia, deleteMedia, nowIso } from './data.js';
 
 const TIMESLICE_MS = 2000;
+// AAC in MP4 (.m4a) first: it plays everywhere (iPhone, Windows, transcription tools). iOS always lands here.
+// Plain 'audio/mp4' could be Opus-in-MP4 on Chrome, so WebM/Opus is preferred over it.
 const MIME_CANDIDATES = [
+  ['audio/mp4;codecs=mp4a.40.2', 'm4a'],
   ['audio/webm;codecs=opus', 'webm'],
   ['audio/webm', 'webm'],
   ['audio/mp4', 'm4a'],
@@ -112,7 +115,15 @@ export async function mountAudio(el, asset) {
   const recordBtn = document.createElement('button');
   recordBtn.type = 'button';
   recordBtn.className = 'btn primary audio-rec-btn';
-  recordBtn.textContent = '● Grabar nota de voz';
+  recordBtn.textContent = '🎙 Grabar nota de voz';
+  const pauseBtn = document.createElement('button');
+  pauseBtn.type = 'button';
+  pauseBtn.className = 'btn audio-pause-btn';
+  pauseBtn.textContent = '⏸ Pausa';
+  pauseBtn.hidden = true;
+  const recRow = document.createElement('div');
+  recRow.className = 'audio-rec-row';
+  recRow.append(recordBtn, pauseBtn);
   const timerEl = document.createElement('div');
   timerEl.className = 'audio-timer';
   timerEl.setAttribute('role', 'timer');
@@ -125,7 +136,7 @@ export async function mountAudio(el, asset) {
   errorEl.hidden = true;
   const listEl = document.createElement('div');
   listEl.className = 'audio-list';
-  root.append(recordBtn, timerEl, noticeEl, errorEl, listEl);
+  root.append(recRow, timerEl, noticeEl, errorEl, listEl);
   el.append(root);
 
   const showError = (msg) => { if (destroyed) return; errorEl.textContent = msg; errorEl.hidden = !msg; };
@@ -239,13 +250,36 @@ export async function mountAudio(el, asset) {
 
   function setRecordingUi(on) {
     if (destroyed) return;
-    recordBtn.textContent = on ? '■ Detener' : '● Grabar nota de voz';
+    recordBtn.textContent = on ? '■ Terminar' : '🎙 Grabar nota de voz';
     recordBtn.classList.toggle('danger', on);
     recordBtn.classList.toggle('primary', !on);
     recordBtn.classList.toggle('audio-recording', on);
+    pauseBtn.hidden = !on || typeof MediaRecorder === 'undefined' || !MediaRecorder.prototype.pause;
+    pauseBtn.textContent = '⏸ Pausa'; pauseBtn.classList.remove('paused');
     timerEl.hidden = !on;
+    timerEl.classList.remove('paused');
     if (!on) { clearInterval(timerId); timerId = null; }
   }
+  // Recorded time excluding pauses.
+  const elapsed = (s) => (s.pausedAt ? s.pausedAt : performance.now()) - s.t0 - s.pausedMs;
+  function togglePause() {
+    const s = rec;
+    if (!s) return;
+    try {
+      if (s.recorder.state === 'recording') {
+        s.recorder.pause(); s.pausedAt = performance.now();
+        pauseBtn.textContent = '▶ Seguir'; pauseBtn.classList.add('paused');
+        recordBtn.classList.remove('audio-recording'); timerEl.classList.add('paused');
+      } else if (s.recorder.state === 'paused') {
+        s.pausedMs += performance.now() - s.pausedAt; s.pausedAt = 0;
+        s.recorder.resume();
+        pauseBtn.textContent = '⏸ Pausa'; pauseBtn.classList.remove('paused');
+        recordBtn.classList.add('audio-recording'); timerEl.classList.remove('paused');
+      }
+      timerEl.textContent = fmtTime(elapsed(s) / 1000) + (s.pausedAt ? ' · en pausa' : '');
+    } catch (e) { showError(errorMessage(e)); }
+  }
+  pauseBtn.addEventListener('click', togglePause);
 
   async function startRecording() {
     if (rec || starting) return;
@@ -269,7 +303,7 @@ export async function mountAudio(el, asset) {
       const ext = /mp4/.test(mime) ? 'm4a' : /ogg/.test(mime) ? 'ogg' : 'webm';
       const session = {
         recId: crypto.randomUUID(), recorder, stream, mime, ext,
-        startedAt: nowIso(), order: Date.now(), t0: 0,
+        startedAt: nowIso(), order: Date.now(), t0: 0, pausedMs: 0, pausedAt: 0,
         parts: [], n: 0, writes: [], persistFailed: null, failure: null, finalizing: null
       };
       activeRecIds.add(session.recId);
@@ -295,7 +329,7 @@ export async function mountAudio(el, asset) {
       rec = session;
       setRecordingUi(true);
       timerEl.textContent = '00:00';
-      timerId = setInterval(() => { if (rec) timerEl.textContent = fmtTime((performance.now() - rec.t0) / 1000); }, 500);
+      timerId = setInterval(() => { if (rec) timerEl.textContent = fmtTime(elapsed(rec) / 1000) + (rec.pausedAt ? ' · en pausa' : ''); }, 500);
       // Auto-finalize if the recorder stops by itself (error, track ended); keeps data and frees the mic.
       session.stopped.then(() => { finalize(session); });
     } catch (e) {
@@ -311,7 +345,7 @@ export async function mountAudio(el, asset) {
   function finalize(session) {
     if (session.finalizing) return session.finalizing;
     session.finalizing = (async () => {
-      const durationS = (performance.now() - session.t0) / 1000;
+      const durationS = elapsed(session) / 1000;
       session.stream.getTracks().forEach((t) => t.stop());
       if (rec === session) { rec = null; setRecordingUi(false); }
       try {

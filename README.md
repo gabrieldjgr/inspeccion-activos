@@ -2,14 +2,14 @@
 
 App web instalable para registrar activos en campo, 100 % offline después de la primera carga. Sitio estático (HTML + CSS + JS, sin build) pensado para GitHub Pages. La especificación completa está en `BRIEF_App_Inspeccion_Activos.md`.
 
-**Estado: v0.3.0 — F0 (proyectos) del plan v0.3.** Sobre la base v0.2 (registro, fotos, audio, exportación ZIP, respaldo) se agregan proyectos, código de valuador, paquete de proyecto y la migración segura de los datos existentes. Verificado en Chromium de escritorio con pruebas automatizadas (migración v1→v2 con datos reales de v0.2.2, fallo simulado a mitad de la migración, aislamiento entre proyectos, paquetes y restauración de respaldos v1/v2). **Sin probar aún en dispositivo real:** cámara, micrófono, compartir y modo avión (ver pruebas manuales abajo).
+**Estado: v0.3.1 — F0 (proyectos) y F1 (captura rápida) del plan v0.3.** Sobre la base v0.2 (registro, fotos, audio, exportación ZIP, respaldo) se agregan proyectos, código de valuador, paquete de proyecto y la migración segura de los datos existentes. Verificado en Chromium de escritorio con pruebas automatizadas (migración v1→v2 con datos reales de v0.2.2, fallo simulado a mitad de la migración, aislamiento entre proyectos, paquetes y restauración de respaldos v1/v2). **Sin probar aún en dispositivo real:** cámara, micrófono, compartir y modo avión (ver pruebas manuales abajo).
 
 ## Estructura
 
 ```
 index.html  styles.css  manifest.webmanifest  sw.js  .nojekyll
 js/    app.js (rutas, ajustes, edificios) · assets.js (formulario, lista, departamentos) · data.js (contratos de datos)
-       projects.js (proyectos, paquete de proyecto) · migrate.js (pantalla de migración v1→v2)
+       projects.js (proyectos, paquete de proyecto) · migrate.js (pantalla de migración v1→v2) · camera.js (cámara rápida, beta)
        photos.js · audio.js · export.js · db.js (IndexedDB) · csv.js · version.js
 css/   photos.css · audio.css · export.css      vendor/ fflate.esm.js (ZIP, vendorizado)
 icons/ iconos PNG (any, maskable, apple-touch)
@@ -84,9 +84,21 @@ B-05,"Taller de Mantenimiento, Anexo"
 - **Migración desde v0.2:** al abrir la versión nueva con datos anteriores aparece *Actualización de datos*: 1) descargar respaldo (formato v0.2, se puede restaurar incluso en la versión anterior); 2) actualizar. Todo pasa a "Proyecto 1". La actualización es una única transacción: si falla, la base queda exactamente como estaba; las fotos y audios no se reescriben. Además se guarda una copia interna (`_v1_backup`) de edificios, departamentos y contexto.
 - **Respaldo completo** (Exportar): incluye todos los proyectos. Restaurar un respaldo v0.2 lo carga en el proyecto activo; uno v0.3 agrega proyectos/edificios que falten y fusiona activos por id (gana el más reciente).
 
+## Captura rápida de activos (v0.3 F1)
+
+- **ID del activo** `B1-GA-A001`: edificio + código de valuador + consecutivo por edificio (por proyecto y valuador). Se asigna al guardar; nunca se reutiliza un número. Si se cambia el edificio de un activo **no exportado**, recibe un ID nuevo del edificio nuevo (el anterior queda en `previous_display_ids`); si ya se exportó, conserva su ID y se anota `moved_from_building_code`. Los activos migrados de v0.2 reciben su ID al definir el código de valuador (sin marcarse como "por exportar").
+- **Guardar y nuevo** (botón principal): confirmación verde a pantalla completa con el ID + vibración, y el formulario nuevo muestra la franja **"Anterior guardado"** (ID, fotos, audios, aviso *sin foto*) con *Abrir* y *Copiar*. Conserva edificio, piso y departamento. **Guardar y salir** vuelve a la lista con la fila resaltada.
+- **Nuevo edificio** desde el selector de edificio del activo (código sugerido B{n+1}); queda en el proyecto marcado `source: 'field'`.
+- **Copiar activo**: desde la franja "Anterior" o desde un activo guardado. Crea un borrador con la misma ubicación (se cambia en el formulario) y, a elección, notas, audios y fotos (por defecto solo notas). Guarda `copied_from`; las fotos/audios copiados llevan `copied: true` y `_copia` en el nombre al exportar.
+- **Fotos**: botones grandes **📷 Foto** y **🔎 Placa**, y *Galería*. Normal: lado largo 3072 px, JPEG 0,88. **Placa**: el JPEG original sin recomprimir (o 4096 px/0,92 si no es JPEG). HEIC/WebP se convierten a JPEG; las capturas de pantalla PNG se mantienen. En el visor se marca cada foto como General / Placa / Detalle; la línea *Sugeridas* indica cuáles faltan (no es obligatorio). Al exportar: `foto_02_placa.jpg`.
+- **Cámara rápida (beta)**, en Ajustes → Cámara: varias fotos sin salir de la app, con modo Foto/Placa y linterna si el teléfono la ofrece. En Android usa la resolución completa del sensor (ImageCapture); en iPhone es un cuadro de video, por eso para placas conviene la cámara del sistema (siempre disponible).
+- **Voz**: botón grande con **Pausa / Seguir** y **Terminar**; la duración no cuenta las pausas. Formato preferido `.m4a` (AAC) si el navegador lo graba; si no, `.webm` (Opus).
+- **Lista**: miniaturas grandes, ID en negrita, filtros rápidos (Todos, Hoy, Sin foto, Sin nota, Por exportar, Copias), búsqueda por ID, botón flotante **+**.
+- **Modo sol** (Ajustes → Pantalla): alto contraste para trabajar al aire libre.
+
 ## Formato del ZIP exportado
 
-`inspeccion_{proyecto}_{device8}_{YYYYMMDD-HHmm}_parte{n}.zip` con `manifest.json` (con `project` y `valuer_code`), `activos.csv` (UTF-8 con BOM), `activos.json`, `edificios.csv` y `activos/{BLDG}_{seq4}_{uuid8}/` con `activo.json`, `foto_NN.jpg`, `captura_NN.png`, `audio_NN.webm|m4a` y `notas.txt`. Se parte en varios ZIP según el tamaño máximo elegido. El respaldo completo (`respaldo_*.zip`) se restaura desde Exportar → *Restaurar respaldo*.
+`inspeccion_{proyecto}_{device8}_{YYYYMMDD-HHmm}_parte{n}.zip` (la estructura definitiva para IA llega en F4) con `manifest.json` (con `project` y `valuer_code`), `activos.csv` (UTF-8 con BOM), `activos.json`, `edificios.csv` y `activos/{BLDG}_{seq4}_{uuid8}/` con `activo.json`, `foto_NN.jpg`, `captura_NN.png`, `audio_NN.webm|m4a` y `notas.txt`. Se parte en varios ZIP según el tamaño máximo elegido. El respaldo completo (`respaldo_*.zip`) se restaura desde Exportar → *Restaurar respaldo*.
 
 ## Transcribir las notas de voz (escritorio)
 
@@ -119,3 +131,16 @@ La app solo graba los audios. Para transcribirlos en tu PC (Whisper local, espa�
 5. Archivar el proyecto activo: la app pide elegir otro; reactivarlo desde *Archivados*.
 6. Exportar ZIP: el nombre incluye el proyecto y solo trae activos de ese proyecto.
 7. Modo avión: crear un proyecto y un activo sin conexión.
+
+## Pruebas manuales — v0.3 F1 (captura rápida)
+
+1. **Nuevo activo** → Edificio → *+ Nuevo edificio* → crear "B14 Taller" sin salir. Piso, departamento.
+2. **🔎 Placa** y **📷 Foto** con la cámara del sistema: la placa debe verse nítida con zoom en el visor (marca la otra como *General*).
+3. Grabar voz, **Pausa**, hablar (no debe grabarse), **Seguir**, **Terminar**; reproducir.
+4. **Guardar y nuevo**: se ve el ID en verde a pantalla completa, vibra, y arriba queda "Anterior guardado: B14-XX-A001". El nuevo activo conserva edificio/piso/departamento.
+5. En la franja, **Copiar** → solo notas → cambiar el departamento → guardar: nuevo ID, chip "copia" en la lista.
+6. Cambiar el edificio de un activo ya guardado (no exportado): su ID cambia al del edificio nuevo.
+7. Ajustes → Cámara → **Cámara rápida**: tomar 5 fotos seguidas sin salir; probar *Placa* y la linterna; comparar nitidez de una placa contra la cámara del sistema. **Anotar resultado en S21 y en iPhone.**
+8. Ajustes → Pantalla → **Modo sol**: probar al sol, con guantes.
+9. Lista: filtros *Sin foto* / *Copias*, búsqueda por "A001".
+10. Exportar: el ZIP trae `activos/B14-XX-A001_…/foto_01_placa.jpg` y `display_id` en `activos.csv`. Revisar si el audio sale `.m4a` o `.webm` en el S21.

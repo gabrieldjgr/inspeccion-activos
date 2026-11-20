@@ -13,7 +13,7 @@ import { getSavedAssets, getMedia, isPending, deleteAsset, folderName, blobId, n
 import { projectSlug, createProject } from './projects.js';
 
 const PART_OVERHEAD = 4096; // estimated bytes of JSON/CSV/txt per asset for partition planning
-const CSV_COLUMNS = ['id', 'seq', 'inspector', 'created_at', 'building_code', 'building_name', 'floor', 'department', 'notes', 'n_photos', 'n_audios', 'folder', 'gps_lat', 'gps_lon', 'gps_accuracy_m'];
+const CSV_COLUMNS = ['display_id', 'id', 'seq', 'inspector', 'created_at', 'building_code', 'building_name', 'floor', 'department', 'notes', 'n_photos', 'n_audios', 'photo_tags', 'copied_from', 'folder', 'gps_lat', 'gps_lon', 'gps_accuracy_m'];
 
 // ---------------------------------------------------------------- pure helpers (testable in Node)
 
@@ -28,8 +28,9 @@ const extOf = (rec, fallback) => String(rec.ext || MIME_EXT[String(rec.mime_type
 export function mediaNames(photos, audios) {
   let f = 0; let c = 0; let a = 0;
   const num = (n) => String(n).padStart(2, '0');
-  const photoNames = photos.map((p) => (p.source === 'gallery' && p.is_screenshot ? `captura_${num(++c)}.${extOf(p, 'png')}` : `foto_${num(++f)}.${extOf(p, 'jpg')}`));
-  const audioNames = audios.map((x) => `audio_${num(++a)}.${extOf(x, 'webm')}`);
+  const sfx = (m) => `${m.tag ? '_' + String(m.tag).replace(/[^\w]/g, '') : ''}${m.copied ? '_copia' : ''}`;
+  const photoNames = photos.map((p) => (p.source === 'gallery' && p.is_screenshot ? `captura_${num(++c)}${sfx(p)}.${extOf(p, 'png')}` : `foto_${num(++f)}${sfx(p)}.${extOf(p, 'jpg')}`));
+  const audioNames = audios.map((x) => `audio_${num(++a)}${sfx(x)}.${extOf(x, 'webm')}`);
   return { photoNames, audioNames };
 }
 
@@ -37,6 +38,7 @@ export function mediaNames(photos, audios) {
 export function buildAssetDoc(asset, photos, audios, names, exportedAt, deviceId) {
   return {
     schema_version: 1,
+    display_id: asset.display_id ?? null,
     id: asset.id,
     project_id: asset.project_id ?? null,
     seq: asset.seq ?? null,
@@ -52,14 +54,17 @@ export function buildAssetDoc(asset, photos, audios, names, exportedAt, deviceId
     department: asset.department ?? '',
     notes: asset.notes ?? '',
     gps: asset.gps || { lat: null, lon: null, accuracy_m: null },
+    copied_from: asset.copied_from ? asset.copied_from.display_id || asset.copied_from.id : null,
+    previous_display_ids: asset.previous_display_ids || [],
+    moved_from_building_code: asset.moved_from_building_code ?? null,
     photos: photos.map((p, i) => ({
       file: names.photoNames[i], source: p.source ?? 'camera', is_screenshot: !!p.is_screenshot,
       width: p.width ?? null, height: p.height ?? null, bytes: p.bytes ?? p.blob?.size ?? null,
-      resized: !!p.resized, captured_at: p.captured_at ?? null
+      resized: !!p.resized, captured_at: p.captured_at ?? null, tag: p.tag ?? null, copied: !!p.copied
     })),
     audios: audios.map((x, i) => ({
       file: names.audioNames[i], mime_type: x.mime_type ?? null, duration_s: x.duration_s ?? null,
-      recorded_at: x.recorded_at ?? null, transcript: x.transcript ?? null
+      recorded_at: x.recorded_at ?? null, transcript: x.transcript ?? null, copied: !!x.copied
     })),
     exported_at: exportedAt
   };
@@ -69,7 +74,7 @@ export function buildAssetDoc(asset, photos, audios, names, exportedAt, deviceId
 export function assetsToCsv(docs) {
   const lines = [CSV_COLUMNS.join(',')];
   for (const d of docs) {
-    const row = { ...d, n_photos: d.photos.length, n_audios: d.audios.length, folder: folderName(d), gps_lat: d.gps?.lat ?? '', gps_lon: d.gps?.lon ?? '', gps_accuracy_m: d.gps?.accuracy_m ?? '' };
+    const row = { ...d, n_photos: d.photos.length, n_audios: d.audios.length, photo_tags: d.photos.map((p) => p.tag).filter(Boolean).join(' '), folder: folderName(d), gps_lat: d.gps?.lat ?? '', gps_lon: d.gps?.lon ?? '', gps_accuracy_m: d.gps?.accuracy_m ?? '' };
     lines.push(CSV_COLUMNS.map((k) => csvEscape(row[k])).join(','));
   }
   return '﻿' + lines.join('\r\n') + '\r\n';
