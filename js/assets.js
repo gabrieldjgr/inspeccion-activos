@@ -5,6 +5,7 @@ import { parseDepartmentsCsv, csvEscape } from './csv.js';
 import { mountPhotos } from './photos.js';
 import { mountAudio } from './audio.js';
 import { projectDialog } from './projects.js';
+import { addTombstone } from './ai-export.js';
 
 let cleanup = null;
 export function leave() { if (cleanup) { const c = cleanup; cleanup = null; try { c(); } catch (e) { console.error(e); } } }
@@ -345,7 +346,9 @@ export async function viewAssetForm(h, id) {
   };
   const del = $('#s-del'); if (del) del.onclick = async () => {
     if (await h.confirmDlg('Borrar activo', `<p>¿Borrar <strong>${h.esc(assetLabel(a))}</strong> con todas sus fotos y audios? No se puede deshacer.</p>`, 'Borrar', 'danger')) {
-      gone = true; leave(); await chain; await deleteAsset(a.id);
+      gone = true; leave(); await chain;
+      await addTombstone(await db.get('assets', a.id)); // exported before: the next export tells the AI it was deleted
+      await deleteAsset(a.id);
       if (h.state.lastSaved?.id === a.id) h.state.lastSaved = null;
       h.navigate('#/');
     }
@@ -356,10 +359,12 @@ export async function viewAssetForm(h, id) {
 const filters = { pid: null, quick: 'all', b: '', f: '', d: '', q: '', limit: 50 };
 const QUICK = { all: 'Todos', today: 'Hoy', nophoto: 'Sin foto', nonote: 'Sin nota', pending: 'Por exportar', copied: 'Copias' };
 
-export async function viewHome(h) {
+export async function viewHome(h, params) {
   leave();
   const pid = h.state.project.id;
   if (filters.pid !== pid) Object.assign(filters, { pid, quick: 'all', b: '', f: '', d: '', q: '', limit: 50 }); // filters belong to one project
+  const qf = params?.get?.('f');
+  if (qf && QUICK[qf]) Object.assign(filters, { quick: qf, b: '', f: '', d: '', q: '', limit: 50 });
   const [nB, inspector, info, all, media] = await Promise.all([db.countByProject('buildings', pid), db.getSetting('inspector', ''), h.storageInfo(), db.getByProject('assets', pid), mediaIndex()]);
 
   // Drafts: drop empty ones, offer to continue the rest.

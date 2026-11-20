@@ -2,7 +2,7 @@
 
 App web instalable para registrar activos en campo, 100 % offline después de la primera carga. Sitio estático (HTML + CSS + JS, sin build) pensado para GitHub Pages. La especificación completa está en `BRIEF_App_Inspeccion_Activos.md`.
 
-**Estado: v0.3.3 — F0 (proyectos), F1 (captura rápida), F2 (edificios estructurados) y F3 (plantilla e importación) del plan v0.3.** Sobre la base v0.2 (registro, fotos, audio, exportación ZIP, respaldo) se agregan proyectos, código de valuador, paquete de proyecto y la migración segura de los datos existentes. Verificado en Chromium de escritorio con pruebas automatizadas (migración v1→v2 con datos reales de v0.2.2, fallo simulado a mitad de la migración, aislamiento entre proyectos, paquetes y restauración de respaldos v1/v2). **Sin probar aún en dispositivo real:** cámara, micrófono, compartir y modo avión (ver pruebas manuales abajo).
+**Estado: v0.3.4 — F0 (proyectos), F1 (captura rápida), F2 (edificios), F3 (plantilla e importación) y F4 (exportación para IA) del plan v0.3.** Sobre la base v0.2 (registro, fotos, audio, exportación ZIP, respaldo) se agregan proyectos, código de valuador, paquete de proyecto y la migración segura de los datos existentes. Verificado en Chromium de escritorio con pruebas automatizadas (migración v1→v2 con datos reales de v0.2.2, fallo simulado a mitad de la migración, aislamiento entre proyectos, paquetes y restauración de respaldos v1/v2). **Sin probar aún en dispositivo real:** cámara, micrófono, compartir y modo avión (ver pruebas manuales abajo).
 
 ## Estructura
 
@@ -12,6 +12,7 @@ js/    app.js (rutas, ajustes, edificios) · assets.js (formulario, lista, depar
        projects.js (proyectos, paquete de proyecto) · migrate.js (pantalla de migración v1→v2) · camera.js (cámara rápida, beta)
        buildings.js (lista con estados y formulario de edificio) · bldg-schema.js (columnas del Excel, listas, unidades)
        bldg-import.js (plantilla e importación de edificios) · xlsx.js (lector/escritor .xlsx mínimo sobre fflate)
+       ai-export.js (ZIP para IA: estructura, índice, README_IA) · ziputil.js (ZIP, SHA-256) · export.js (pantalla Exportar, respaldo)
        photos.js · audio.js · export.js · db.js (IndexedDB) · csv.js · version.js
 css/   photos.css · audio.css · export.css      vendor/ fflate.esm.js (ZIP, vendorizado)
 icons/ iconos PNG (any, maskable, apple-touch)
@@ -121,9 +122,30 @@ B-05,"Taller de Mantenimiento, Anexo"
 - **Estados**: *Pendiente* (nada capturado en campo; la precarga no cuenta), *En proceso* (alguna foto, audio, nota o campo editado), *Inspeccionado* (botón *Marcar inspeccionado*, exige ≥ 1 foto y avisa qué campos faltan sin bloquear; si se borran todas las fotos vuelve a *En proceso*). La lista muestra contadores que funcionan como filtros, barra de avance, búsqueda y por edificio: fotos, audios, activos y campos llenos.
 - Exportar ZIP incluye `edificios/{CÓDIGO}/edificio.json` (campos en unidades del proyecto + medidas originales con su operación), fotos, audios y `notas.txt`, y `edificios.csv` con las 33 columnas en el orden y encabezados del Excel más columnas de la app. El respaldo completo incluye datos y medios de los edificios.
 
-## Formato del ZIP exportado
+## Formato del ZIP exportado (v0.3 F4, para procesar con IA)
 
-`inspeccion_{proyecto}_{device8}_{YYYYMMDD-HHmm}_parte{n}.zip` (la estructura definitiva para IA llega en F4) con `manifest.json` (con `project` y `valuer_code`), `activos.csv` (UTF-8 con BOM), `activos.json`, `edificios.csv` y `activos/{BLDG}_{seq4}_{uuid8}/` con `activo.json`, `foto_NN.jpg`, `captura_NN.png`, `audio_NN.webm|m4a` y `notas.txt`. Se parte en varios ZIP según el tamaño máximo elegido. El respaldo completo (`respaldo_*.zip`) se restaura desde Exportar → *Restaurar respaldo*.
+`inspeccion_{proyecto}_{códigoValuador}_{AAAAMMDD-HHmm}_parte{n}de{total}.zip`
+
+```
+README_IA.md      instrucciones para la IA: qué es, cómo leerlo, IDs, fotos/placas, copias, avisos, unidades
+indice.json       todos los registros de la exportación con rutas a sus archivos y la parte donde está cada uno
+activos.csv       un activo por fila (ID, ubicación, notas, nº fotos/audios, etiquetas, avisos, copia, GPS, carpeta, parte)
+edificios.csv     33 columnas del Excel de levantamiento (unidades del proyecto) + estado, conteos, notas, carpeta, parte
+archivos.csv      un archivo por fila (ruta, parte, dueño, tipo, etiqueta, copia, mime, bytes, fecha)
+manifest.json     archivos de ESTA parte con SHA-256 y tamaño
+B1_job-shop/                         una carpeta por edificio: {CÓDIGO}_{nombre}
+  B1_edificio.json  B1_notas.txt  B1_foto_01_general.jpg  B1_audio_01.m4a
+  activos/B1-GA-A001/                una carpeta por activo
+    B1-GA-A001.json  B1-GA-A001_notas.txt  B1-GA-A001_foto_01_placa.jpg  B1-GA-A001_audio_01.m4a
+```
+
+- Todo nombre de archivo empieza con el ID de su registro (único aunque se aplane el ZIP). Sufijos de foto: `_placa`, `_general`, `_detalle`, `_copia`.
+- Cada registro trae `warnings`: `sin_foto`, `sin_nota`, `sin_placa`, `copia_sin_fotos_propias`.
+- **Alcance**: *incremental* (lo nuevo o editado desde la última exportación; predeterminado), *completo*, *un edificio* o *rango de fechas*. Los activos borrados por el valuador después de haberse exportado se informan en `indice.json → deleted` en la siguiente exportación.
+- **Partes**: tamaño máximo por destino (20 MB correo, 200 MB, 500 MB, 1 GB WhatsApp/Teams/Drive). Un edificio con sus activos va completo en una parte si cabe; si no, se reparte registro por registro. Cada parte trae el índice completo.
+- Antes de exportar, la pantalla avisa cuántos activos van sin foto, sin nota o sin foto de placa, y cuántos edificios sin foto o sin marcar como inspeccionados (enlaces a la lista filtrada). No bloquea.
+- Compartir: en iPhone el ZIP se comparte directo; en Android, Chrome no permite compartir ZIP desde una app web: *Descargar* y adjuntarlo desde WhatsApp/Teams/Outlook (*Documento → Descargas*) o subirlo en Drive.
+- El respaldo completo (`respaldo_*.zip`) no cambia: se restaura desde Exportar → *Restaurar respaldo*.
 
 ## Transcribir las notas de voz (escritorio)
 
@@ -188,3 +210,12 @@ La app solo graba los audios. Para transcribirlos en tu PC (Whisper local, espa�
 4. Capturar algo en campo en un edificio y reimportar: con "completar campos vacíos" lo capturado no cambia.
 5. Probar un archivo con un código repetido y una fila sin código: los errores deben indicar la fila.
 6. *Edificios a Excel* → abrir en Excel → reimportar sin cambios: "0 nuevos, 0 se actualizan".
+
+## Pruebas manuales — v0.3 F4 (exportación para IA)
+
+1. Exportar → *Todo el proyecto*: revisar el aviso previo (sin foto / sin nota / sin placa) y tocar un enlace: abre la lista filtrada.
+2. Descargar el ZIP y abrirlo en la PC: carpetas por edificio y activo, nombres con el ID, `README_IA.md`, `indice.json`, CSV abren en Excel con acentos.
+3. Darle el ZIP a la IA (p. ej. Claude) con la instrucción "procesa este levantamiento según README_IA.md" y revisar que identifique placas y copias.
+4. Editar un activo y borrar otro ya exportado → *Solo lo nuevo o editado*: el ZIP trae solo el editado y `deleted` con el borrado.
+5. Elegir *20 MB — correo* con muchas fotos: varias partes `parte1deN…`; cada edificio completo en una parte.
+6. Android: *Descargar* y adjuntar desde WhatsApp (Documento → Descargas). iPhone: *Compartir* directo.

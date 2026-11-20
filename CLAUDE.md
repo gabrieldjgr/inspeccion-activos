@@ -11,6 +11,7 @@ Especificación completa: `BRIEF_App_Inspeccion_Activos.md` (léela antes de cam
 - Todo dato (edificios, departamentos, listas, activos) pertenece a un proyecto: filtra siempre por `project_id` (`db.getByProject`). Los cambios de esquema van como nueva versión en `db.js` dentro de la transacción de upgrade; nunca reescribir el store `blobs` en una migración.
 - El ID visible (`display_id`, `B1-GA-A001`) solo se asigna dentro de `saveAsset`/`assignMissingDisplayIds` (transacción con el contador); nunca a mano. El proyecto activo de `h.state` puede estar desfasado: lee `last_context` de la base.
 - Edificios: el modelo vive en `js/bldg-schema.js` (columnas del Excel, listas, unidades). Los campos van en `building.fields`; las medidas como `{value, unit, expr}`. Los medios del edificio usan `blobs.asset_id` = id del edificio; el formulario es el único que escribe el registro (más importación/restauración).
+- La exportación para IA (`js/ai-export.js`) es un contrato con el procesamiento posterior: si cambias estructura o campos, sube `EXPORT_SCHEMA_VERSION` y actualiza `README_IA` y el README.
 - Un activo está "por exportar" si `!exported_at || updated_at > exported_at`; no toques `updated_at` al marcar `exported_at`.
 
 ## Probar

@@ -53,7 +53,7 @@ function download(filename, blob) {
 
 // ---------- router (hash based: works on GitHub Pages with refresh) ----------
 const routes = {
-  '': () => assetsUi.viewHome(h),
+  '': (p) => assetsUi.viewHome(h, p),
   nuevo: () => assetsUi.viewAssetForm(h, null),
   activo: (p) => assetsUi.viewAssetForm(h, p.get('id')),
   departamentos: () => assetsUi.viewDepartments(h),
